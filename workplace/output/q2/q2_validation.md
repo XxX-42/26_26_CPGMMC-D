@@ -1,0 +1,3 @@
+# Q2 P1 Validator
+
+Q2_VALID = True；全部硬违规为 0；Q1_FREEZE_INTEGRITY = PASS；Q2_V1_FREEZE = PASS。

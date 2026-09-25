@@ -1,0 +1,336 @@
+{
+  "Q3_FINAL_FREEZE": "PASS",
+  "Q4_K2_VALID": true,
+  "Q4_K3_VALID": true,
+  "Q4_K2_EXACT": true,
+  "Q4_K3_EXACT": true,
+  "component_count": 3,
+  "inventory": {
+    "A_UAV": 4,
+    "B_UAV": 2,
+    "C_UAV": 2,
+    "A_BATTERY": 6,
+    "B_BATTERY": 4,
+    "C_BATTERY": 4,
+    "RELAY_UAV": 2,
+    "RELAY_COMPONENT": 6
+  },
+  "global_requirement": {
+    "A_UAV": 4,
+    "B_UAV": 2,
+    "C_UAV": 2,
+    "A_BATTERY": 6,
+    "B_BATTERY": 4,
+    "C_BATTERY": 4,
+    "RELAY_UAV": 2,
+    "RELAY_COMPONENT": 3
+  },
+  "K2": {
+    "K": 2,
+    "partitions_checked": 3,
+    "stirling_expected": 3,
+    "EXACT": true,
+    "objective_exact": [
+      "3/4",
+      "3/4",
+      "570219471268950049/601450661787756989"
+    ],
+    "objective_decimal": [
+      0.75,
+      0.75,
+      0.9480735619677014
+    ],
+    "split_requirement": {
+      "A_UAV": 4,
+      "B_UAV": 2,
+      "C_UAV": 3,
+      "A_BATTERY": 6,
+      "B_BATTERY": 4,
+      "C_BATTERY": 5,
+      "RELAY_UAV": 2,
+      "RELAY_COMPONENT": 3
+    },
+    "gap": {
+      "A_UAV": 0,
+      "B_UAV": 0,
+      "C_UAV": 1,
+      "A_BATTERY": 0,
+      "B_BATTERY": 0,
+      "C_BATTERY": 1,
+      "RELAY_UAV": 0,
+      "RELAY_COMPONENT": 0
+    },
+    "redundancy": {
+      "A_UAV": 0,
+      "B_UAV": 0,
+      "C_UAV": 1,
+      "A_BATTERY": 0,
+      "B_BATTERY": 0,
+      "C_BATTERY": 1,
+      "RELAY_UAV": 0,
+      "RELAY_COMPONENT": 0
+    },
+    "groups": [
+      {
+        "group": 1,
+        "mask": 3,
+        "services": [
+          "S001",
+          "S002",
+          "S003",
+          "S004",
+          "S005",
+          "S007",
+          "S008",
+          "S009",
+          "S010",
+          "S011",
+          "S012",
+          "S013",
+          "S014",
+          "S015"
+        ],
+        "transport_sorties": [
+          "Q3-T001",
+          "Q3-T003",
+          "Q3-T004",
+          "Q3-T006",
+          "Q3-T014",
+          "Q3-T007",
+          "Q3-T008",
+          "Q3-T015",
+          "Q3-T005",
+          "Q3-T010",
+          "Q3-T011",
+          "Q3-T002",
+          "Q3-T016",
+          "Q3-T020",
+          "Q3-T019",
+          "Q3-T018",
+          "Q3-T017",
+          "Q3-T021",
+          "Q3-T013",
+          "Q3-T024",
+          "Q3-T025",
+          "Q3-T022",
+          "Q3-T023"
+        ],
+        "relay_sorties": [
+          "Q3-R004",
+          "Q3-R001",
+          "Q3-R002",
+          "Q3-R003",
+          "Q3-R005"
+        ],
+        "box_count": 74,
+        "cargo_mass_kg": 699.0,
+        "workload_resource_s": 58583.50665283535,
+        "workload_exact": "585835066528353519/10000000000000",
+        "resources": {
+          "A_UAV": 4,
+          "B_UAV": 2,
+          "C_UAV": 2,
+          "A_BATTERY": 6,
+          "B_BATTERY": 4,
+          "C_BATTERY": 4,
+          "RELAY_UAV": 2,
+          "RELAY_COMPONENT": 3
+        }
+      },
+      {
+        "group": 2,
+        "mask": 4,
+        "services": [
+          "S006"
+        ],
+        "transport_sorties": [
+          "Q3-T009"
+        ],
+        "relay_sorties": [],
+        "box_count": 6,
+        "cargo_mass_kg": 59.0,
+        "workload_resource_s": 1561.559525940347,
+        "workload_exact": "1561559525940347/1000000000000",
+        "resources": {
+          "A_UAV": 0,
+          "B_UAV": 0,
+          "C_UAV": 1,
+          "A_BATTERY": 0,
+          "B_BATTERY": 0,
+          "C_BATTERY": 1,
+          "RELAY_UAV": 0,
+          "RELAY_COMPONENT": 0
+        }
+      }
+    ]
+  },
+  "K3": {
+    "K": 3,
+    "partitions_checked": 1,
+    "stirling_expected": 1,
+    "EXACT": true,
+    "objective_exact": [
+      "2/1",
+      "13/6",
+      "526388120439447439/601450661787756989"
+    ],
+    "objective_decimal": [
+      2.0,
+      2.1666666666666665,
+      0.8751975080961869
+    ],
+    "split_requirement": {
+      "A_UAV": 4,
+      "B_UAV": 2,
+      "C_UAV": 4,
+      "A_BATTERY": 6,
+      "B_BATTERY": 4,
+      "C_BATTERY": 6,
+      "RELAY_UAV": 3,
+      "RELAY_COMPONENT": 4
+    },
+    "gap": {
+      "A_UAV": 0,
+      "B_UAV": 0,
+      "C_UAV": 2,
+      "A_BATTERY": 0,
+      "B_BATTERY": 0,
+      "C_BATTERY": 2,
+      "RELAY_UAV": 1,
+      "RELAY_COMPONENT": 0
+    },
+    "redundancy": {
+      "A_UAV": 0,
+      "B_UAV": 0,
+      "C_UAV": 2,
+      "A_BATTERY": 0,
+      "B_BATTERY": 0,
+      "C_BATTERY": 2,
+      "RELAY_UAV": 1,
+      "RELAY_COMPONENT": 1
+    },
+    "groups": [
+      {
+        "group": 1,
+        "mask": 1,
+        "services": [
+          "S001",
+          "S002",
+          "S003",
+          "S004",
+          "S007",
+          "S008",
+          "S009",
+          "S010",
+          "S011",
+          "S012",
+          "S013",
+          "S014",
+          "S015"
+        ],
+        "transport_sorties": [
+          "Q3-T001",
+          "Q3-T003",
+          "Q3-T004",
+          "Q3-T006",
+          "Q3-T014",
+          "Q3-T007",
+          "Q3-T008",
+          "Q3-T015",
+          "Q3-T005",
+          "Q3-T010",
+          "Q3-T011",
+          "Q3-T002",
+          "Q3-T016",
+          "Q3-T020",
+          "Q3-T019",
+          "Q3-T018",
+          "Q3-T017",
+          "Q3-T021",
+          "Q3-T013",
+          "Q3-T024",
+          "Q3-T025",
+          "Q3-T022"
+        ],
+        "relay_sorties": [
+          "Q3-R004",
+          "Q3-R001",
+          "Q3-R002",
+          "Q3-R003"
+        ],
+        "box_count": 68,
+        "cargo_mass_kg": 640.0,
+        "workload_resource_s": 54200.371569885094,
+        "workload_exact": "542003715698850909/10000000000000",
+        "resources": {
+          "A_UAV": 4,
+          "B_UAV": 2,
+          "C_UAV": 2,
+          "A_BATTERY": 6,
+          "B_BATTERY": 4,
+          "C_BATTERY": 4,
+          "RELAY_UAV": 2,
+          "RELAY_COMPONENT": 3
+        }
+      },
+      {
+        "group": 2,
+        "mask": 2,
+        "services": [
+          "S005"
+        ],
+        "transport_sorties": [
+          "Q3-T023"
+        ],
+        "relay_sorties": [
+          "Q3-R005"
+        ],
+        "box_count": 6,
+        "cargo_mass_kg": 59.0,
+        "workload_resource_s": 4383.135082950261,
+        "workload_exact": "4383135082950261/1000000000000",
+        "resources": {
+          "A_UAV": 0,
+          "B_UAV": 0,
+          "C_UAV": 1,
+          "A_BATTERY": 0,
+          "B_BATTERY": 0,
+          "C_BATTERY": 1,
+          "RELAY_UAV": 1,
+          "RELAY_COMPONENT": 1
+        }
+      },
+      {
+        "group": 3,
+        "mask": 4,
+        "services": [
+          "S006"
+        ],
+        "transport_sorties": [
+          "Q3-T009"
+        ],
+        "relay_sorties": [],
+        "box_count": 6,
+        "cargo_mass_kg": 59.0,
+        "workload_resource_s": 1561.559525940347,
+        "workload_exact": "1561559525940347/1000000000000",
+        "resources": {
+          "A_UAV": 0,
+          "B_UAV": 0,
+          "C_UAV": 1,
+          "A_BATTERY": 0,
+          "B_BATTERY": 0,
+          "C_BATTERY": 1,
+          "RELAY_UAV": 0,
+          "RELAY_COMPONENT": 0
+        }
+      }
+    ]
+  },
+  "excel": {
+    "official_excel_roundtrip": "PASS",
+    "Q1_Q2_Q3_sheets_unchanged": true,
+    "q4_rows": 5,
+    "sha256": "22dbc78f07546ba00b319618a7828f34886b0ba26f29a446c966e40f48eee344"
+  }
+}

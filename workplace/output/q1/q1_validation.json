@@ -1,0 +1,97 @@
+{
+  "boxes_total": 80,
+  "boxes_assigned": 80,
+  "boxes_missing": 0,
+  "missing_box_ids": [],
+  "boxes_duplicated": 0,
+  "duplicated_box_ids": {},
+  "cross_service_batch": 0,
+  "mass_violations": 0,
+  "volume_violations": 0,
+  "safe_payload_violations": 0,
+  "energy_reserve_violations": 0,
+  "invalid_aircraft_type": 0,
+  "invalid_service": 0,
+  "unknown_boxes": 0,
+  "stored_value_mismatches": 0,
+  "per_sortie": [
+    {
+      "sortie_id": "Q1-001",
+      "problems": []
+    },
+    {
+      "sortie_id": "Q1-002",
+      "problems": []
+    },
+    {
+      "sortie_id": "Q1-003",
+      "problems": []
+    },
+    {
+      "sortie_id": "Q1-004",
+      "problems": []
+    },
+    {
+      "sortie_id": "Q1-005",
+      "problems": []
+    },
+    {
+      "sortie_id": "Q1-006",
+      "problems": []
+    },
+    {
+      "sortie_id": "Q1-007",
+      "problems": []
+    },
+    {
+      "sortie_id": "Q1-008",
+      "problems": []
+    },
+    {
+      "sortie_id": "Q1-009",
+      "problems": []
+    },
+    {
+      "sortie_id": "Q1-010",
+      "problems": []
+    },
+    {
+      "sortie_id": "Q1-011",
+      "problems": []
+    },
+    {
+      "sortie_id": "Q1-012",
+      "problems": []
+    },
+    {
+      "sortie_id": "Q1-013",
+      "problems": []
+    },
+    {
+      "sortie_id": "Q1-014",
+      "problems": []
+    },
+    {
+      "sortie_id": "Q1-015",
+      "problems": []
+    },
+    {
+      "sortie_id": "Q1-016",
+      "problems": []
+    },
+    {
+      "sortie_id": "Q1-017",
+      "problems": []
+    },
+    {
+      "sortie_id": "Q1-018",
+      "problems": []
+    }
+  ],
+  "Q1_VALID": true,
+  "official_template_export": "PASS",
+  "excel_roundtrip_check": "PASS",
+  "sortie_rows": 18,
+  "unique_boxes": 80,
+  "other_sheets_unchanged": true
+}

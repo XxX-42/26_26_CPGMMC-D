@@ -1,0 +1,6 @@
+﻿scenario_id,rho_A,rho_B,rho_C,total_sorties,total_energy_kwh,total_operation_time_s,A_sorties,B_sorties,C_sorties,minimum_return_soc,payload_reachable_cases,F1_all_optimal,F2_all_optimal,F3_all_optimal
+rho_minus_10pp,0.1,0.1,0.1,18,59.130796486658255,32776.09267694372,0,9,9,0.23088787400030764,45,True,True,True
+rho_minus_05pp,0.15,0.15,0.15,18,59.130796486658255,32776.09267694372,0,9,9,0.23088787400030764,45,True,True,True
+baseline,0.2,0.2,0.2,18,59.130796486658255,32776.09267694372,0,9,9,0.23088787400030764,45,True,True,True
+rho_plus_05pp,0.25,0.25,0.25,19,61.07285863449571,34565.740688117025,0,10,9,0.2704970459512557,45,True,True,True
+rho_plus_10pp,0.3,0.3,0.3,20,67.22708633206148,36586.26912606206,0,9,11,0.3101913389002384,45,True,True,True

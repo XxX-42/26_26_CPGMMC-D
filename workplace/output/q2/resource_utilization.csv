@@ -1,0 +1,4 @@
+﻿aircraft_type,uav_count,uav_used,uav_max_concurrent,uav_mean_utilization,battery_count,battery_used,battery_max_concurrent,battery_mean_busy_fraction,battery_charging_busy_fraction
+A,4,4,4,0.5730255101289191,6,6,6,0.6173163972653755,0.23529939051276275
+B,2,2,2,0.9329089331004291,4,4,4,0.9068691122793404,0.4404146457291259
+C,2,2,2,0.9782969976811248,4,4,4,0.9974715972488828,0.5083230984083204

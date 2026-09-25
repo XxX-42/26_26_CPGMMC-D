@@ -1,0 +1,183 @@
+{
+  "Gate0": {
+    "FINAL_GATE0_VALID": true,
+    "issues": [],
+    "dem_epsg": 4326,
+    "dem_nodata_metadata": null,
+    "invalid_minus_32767_pixels": 0,
+    "nodes": 16,
+    "boxes": 80,
+    "aircraft_types": 3
+  },
+  "Q1": {
+    "FINAL_Q1_VALID": true,
+    "issues": [],
+    "sorties": 18,
+    "box_count": 80,
+    "energy_kwh": 59.130796486658255,
+    "operation_time_s": 32776.09267694372,
+    "A_B_C": [
+      0,
+      9,
+      9
+    ],
+    "payload_cases": 45
+  },
+  "Q2": {
+    "FINAL_Q2_VALID": true,
+    "issues": [],
+    "sorties": 25,
+    "energy_kwh": 70.0227965612103,
+    "makespan_s": 7361.933158195544,
+    "ordinary_tardiness_s": 0,
+    "multistop_routes": 4,
+    "A_B_C": [
+      10,
+      8,
+      7
+    ]
+  },
+  "Q3": {
+    "FINAL_Q3_VALID": true,
+    "issues": [],
+    "transport_sorties": 24,
+    "relay_sorties": 5,
+    "transport_energy_kwh": 68.26689060483082,
+    "relay_energy_kwh": 4.201368441745846,
+    "joint_makespan_s": 10688.15742441989,
+    "ordinary_tardiness_s": 0,
+    "communication_intervals": 202,
+    "minimum_independent_certified_margin_db": 0.29212297724942005,
+    "communication_outage_upper_bound_s": 0.0,
+    "uncertified_duration_s": 0.0
+  },
+  "Q4": {
+    "FINAL_Q4_K2_VALID": true,
+    "FINAL_Q4_K3_VALID": true,
+    "issues": [],
+    "strict_component_count": 3,
+    "inventory": {
+      "A_UAV": 4,
+      "B_UAV": 2,
+      "C_UAV": 2,
+      "A_BATTERY": 6,
+      "B_BATTERY": 4,
+      "C_BATTERY": 4,
+      "RELAY_UAV": 2,
+      "RELAY_COMPONENT": 6
+    },
+    "K2": {
+      "partitions_checked": 3,
+      "gap": {
+        "A_UAV": 0,
+        "B_UAV": 0,
+        "C_UAV": 1,
+        "A_BATTERY": 0,
+        "B_BATTERY": 0,
+        "C_BATTERY": 1,
+        "RELAY_UAV": 0,
+        "RELAY_COMPONENT": 0
+      },
+      "redundancy": {
+        "A_UAV": 0,
+        "B_UAV": 0,
+        "C_UAV": 1,
+        "A_BATTERY": 0,
+        "B_BATTERY": 0,
+        "C_BATTERY": 1,
+        "RELAY_UAV": 0,
+        "RELAY_COMPONENT": 0
+      },
+      "groups": [
+        [
+          "S001",
+          "S002",
+          "S003",
+          "S004",
+          "S005",
+          "S007",
+          "S008",
+          "S009",
+          "S010",
+          "S011",
+          "S012",
+          "S013",
+          "S014",
+          "S015"
+        ],
+        [
+          "S006"
+        ]
+      ],
+      "objective_exact": [
+        "3/4",
+        "3/4",
+        "570219471268950049/601450661787756989"
+      ]
+    },
+    "K3": {
+      "partitions_checked": 1,
+      "gap": {
+        "A_UAV": 0,
+        "B_UAV": 0,
+        "C_UAV": 2,
+        "A_BATTERY": 0,
+        "B_BATTERY": 0,
+        "C_BATTERY": 2,
+        "RELAY_UAV": 1,
+        "RELAY_COMPONENT": 0
+      },
+      "redundancy": {
+        "A_UAV": 0,
+        "B_UAV": 0,
+        "C_UAV": 2,
+        "A_BATTERY": 0,
+        "B_BATTERY": 0,
+        "C_BATTERY": 2,
+        "RELAY_UAV": 1,
+        "RELAY_COMPONENT": 1
+      },
+      "groups": [
+        [
+          "S001",
+          "S002",
+          "S003",
+          "S004",
+          "S007",
+          "S008",
+          "S009",
+          "S010",
+          "S011",
+          "S012",
+          "S013",
+          "S014",
+          "S015"
+        ],
+        [
+          "S005"
+        ],
+        [
+          "S006"
+        ]
+      ],
+      "objective_exact": [
+        "2",
+        "13/6",
+        "526388120439447439/601450661787756989"
+      ]
+    }
+  },
+  "inheritance": {
+    "CROSS_QUESTION_INHERITANCE_VALID": true,
+    "issues": []
+  },
+  "Excel": {
+    "FINAL_EXCEL_ROUNDTRIP": "PASS",
+    "issues": [],
+    "q4_rows": 5,
+    "q3_relay_rows": 5,
+    "q3_communication_rows": 202,
+    "q3_transport_box_rows": 80
+  },
+  "FINAL_ALL_VALID": true
+}

@@ -1,0 +1,53 @@
+{
+  "Q4_K2_VALID": true,
+  "Q4_K3_VALID": true,
+  "Q4_K2_EXACT": true,
+  "Q4_K3_EXACT": true,
+  "K2": {
+    "service_area_total": 15,
+    "service_missing": 0,
+    "service_duplicated": 0,
+    "empty_groups": 0,
+    "transport_must_link_violations": 0,
+    "relay_dependency_violations": 0,
+    "fixed_Q3_transport_changes": 0,
+    "fixed_Q3_relay_changes": 0,
+    "fixed_Q3_time_changes": 0,
+    "fixed_Q3_communication_changes": 0,
+    "cross_group_resource_sharing": 0,
+    "resource_assignment_conflicts": 0,
+    "resource_requirement_underestimated": 0,
+    "transport_task_missing": 0,
+    "relay_task_missing": 0,
+    "transport_task_duplicated": 0,
+    "relay_task_duplicated": 0,
+    "Q4_VALID": true
+  },
+  "K3": {
+    "service_area_total": 15,
+    "service_missing": 0,
+    "service_duplicated": 0,
+    "empty_groups": 0,
+    "transport_must_link_violations": 0,
+    "relay_dependency_violations": 0,
+    "fixed_Q3_transport_changes": 0,
+    "fixed_Q3_relay_changes": 0,
+    "fixed_Q3_time_changes": 0,
+    "fixed_Q3_communication_changes": 0,
+    "cross_group_resource_sharing": 0,
+    "resource_assignment_conflicts": 0,
+    "resource_requirement_underestimated": 0,
+    "transport_task_missing": 0,
+    "relay_task_missing": 0,
+    "transport_task_duplicated": 0,
+    "relay_task_duplicated": 0,
+    "Q4_VALID": true
+  },
+  "excel_roundtrip": {
+    "official_excel_roundtrip": "PASS",
+    "Q1_Q2_Q3_sheets_unchanged": true,
+    "q4_rows": 5,
+    "sha256": "22dbc78f07546ba00b319618a7828f34886b0ba26f29a446c966e40f48eee344"
+  },
+  "fixed_snapshot_sha256": "ee2a6f7ffc766b8efa371f0b601f5e9e03e40441bf25dda2552518ff7dc21a85"
+}

@@ -1,0 +1,24 @@
+{
+  "python_version": "3.13.14 (tags/v3.13.14:fd17997, Jun 10 2026, 13:03:48) [MSC v.1944 64 bit (AMD64)]",
+  "os": "Windows-11-10.0.26200-SP0",
+  "packages": {
+    "numpy": "2.5.3",
+    "pandas": "3.0.6",
+    "scipy": "1.18.1",
+    "openpyxl": "3.1.5",
+    "rasterio": "1.5.1",
+    "pyproj": "3.8.0",
+    "ortools": "9.15.6755",
+    "matplotlib": "3.11.1",
+    "gurobipy": null
+  },
+  "solver_settings_from_source": {
+    "Q1": "Gurobi MIPGap=0；如不可用回退 scipy.optimize.milp；随机种子未在正式源码中设置",
+    "Q2": "CP-SAT；基准 seed=20260924；局部阶段另测试 20260925/20260926；workers=8",
+    "Q3": "CP-SAT seed=20260924；workers=8",
+    "Q4": "完整无标签枚举，无随机求解器"
+  },
+  "time_quantization_s": 0.001,
+  "energy_quantization_kwh": 1e-06,
+  "quantization_scope": "Q2/Q3 离散排程；最终 Validator 使用原始浮点时刻与 kWh"
+}

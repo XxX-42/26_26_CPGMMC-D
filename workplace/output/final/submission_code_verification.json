@@ -1,0 +1,33 @@
+{
+  "AI_COMMENT_ONLY": "PASS",
+  "files": [
+    {
+      "file": "q1.python",
+      "original_sha256": "9f32c95eb1123cc4b0d78577adc8776c9d480314c870368d3d31405d90f6347f",
+      "submission_sha256": "199d8f90ee5fc4ef319907e92b1f5735742a89f1e002b67eb86922ed3dbf72e1",
+      "header_bytes": 468,
+      "comment_only_verified": true
+    },
+    {
+      "file": "q2.python",
+      "original_sha256": "335d65604ef38fb129c7c5569d4ee8a80565a165e421ef74f304c34b792bec16",
+      "submission_sha256": "28be4a344298e563b4c5e30a157353675f1aca26e6668f8ccb94a7d26920675f",
+      "header_bytes": 468,
+      "comment_only_verified": true
+    },
+    {
+      "file": "q3.python",
+      "original_sha256": "cfa18622ccb23b809d398173e0e4b60fc2cabd0d706350e9d0c447020991ad7e",
+      "submission_sha256": "dae80f9edcdce2f75ef3e9ec9b769daba74b2075f542ef852ad671331c65ef3c",
+      "header_bytes": 468,
+      "comment_only_verified": true
+    },
+    {
+      "file": "q4.python",
+      "original_sha256": "3e0022a28cb5ee6e87c21feb5d26f6d6c04f35167c5ceae89e975690f10f4ea6",
+      "submission_sha256": "cc311789a5210a7bd409282ecc2210e9e8b5b03a7f7b4062f05ed50afa9ad644",
+      "header_bytes": 468,
+      "comment_only_verified": true
+    }
+  ]
+}

@@ -1,0 +1,326 @@
+{
+  "Q1_FREEZE_INTEGRITY": "PASS",
+  "Q2_V1_FREEZE": "PASS",
+  "Q2_V2_ACCEPTED": true,
+  "Q2_VALID": true,
+  "V1": {
+    "scenario": "V1",
+    "status": "FEASIBLE",
+    "total_sorties": 21,
+    "total_energy_kwh": 63.40458286441995,
+    "makespan_s": 11134.239158195542,
+    "ordinary_total_tardiness_s": 11402.779175636728,
+    "ordinary_late_boxes": 6,
+    "ordinary_max_lateness_s": 3700.4631959394546,
+    "selected_route_stop_counts": {
+      "1": 21
+    },
+    "A_sorties": 3,
+    "B_sorties": 9,
+    "C_sorties": 9,
+    "Q2_VALID": true,
+    "objective_statuses": []
+  },
+  "V2": {
+    "scenario": "V2",
+    "status": "FEASIBLE",
+    "total_sorties": 25,
+    "total_energy_kwh": 70.0227965612103,
+    "makespan_s": 7361.933158195543,
+    "ordinary_total_tardiness_s": 0,
+    "ordinary_late_boxes": 0,
+    "ordinary_max_lateness_s": 0,
+    "selected_route_stop_counts": {
+      "2": 4,
+      "1": 21
+    },
+    "A_sorties": 10,
+    "B_sorties": 8,
+    "C_sorties": 7,
+    "Q2_VALID": true,
+    "objective_statuses": [
+      "OPTIMAL",
+      "FEASIBLE",
+      "FEASIBLE",
+      "FEASIBLE"
+    ]
+  },
+  "Greedy_baseline": {
+    "scenario": "greedy_baseline",
+    "status": "FEASIBLE",
+    "total_sorties": 23,
+    "total_energy_kwh": 74.99407200986236,
+    "makespan_s": 8849.6204360945,
+    "ordinary_total_tardiness_s": 2434.8722863208695,
+    "ordinary_late_boxes": 3,
+    "ordinary_max_lateness_s": 1196.160762106956,
+    "selected_route_stop_counts": {
+      "1": 21,
+      "2": 2
+    },
+    "A_sorties": 9,
+    "B_sorties": 6,
+    "C_sorties": 8,
+    "Q2_VALID": true,
+    "objective_statuses": []
+  },
+  "candidate_pool": {
+    "round": 1,
+    "v1_preserved": 650,
+    "proposed_total": 13482,
+    "physical_total": 4618,
+    "deadline_total": 4618,
+    "unique_archive": 5190,
+    "dominated_new": 0,
+    "active_count": 1800,
+    "by_stops": {
+      "1": 419,
+      "2": 931,
+      "3": 399,
+      "4": 51
+    },
+    "by_type": {
+      "A": 158,
+      "B": 314,
+      "C": 1328
+    }
+  },
+  "candidate_rounds": [
+    {
+      "round": 0,
+      "active_count": 650,
+      "v1_preserved": 650,
+      "F1_best_s": 11402.779175636728
+    },
+    {
+      "round": 1,
+      "v1_preserved": 650,
+      "proposed_total": 13482,
+      "physical_total": 4618,
+      "deadline_total": 4618,
+      "unique_archive": 5190,
+      "dominated_new": 0,
+      "active_count": 1800,
+      "by_stops": {
+        "1": 419,
+        "2": 931,
+        "3": 399,
+        "4": 51
+      },
+      "by_type": {
+        "A": 158,
+        "B": 314,
+        "C": 1328
+      },
+      "F1_best_s": 2434.8722863208695
+    }
+  ],
+  "selected_multistop_routes": 4,
+  "unused_uav_V1": [
+    [
+      "A",
+      "U03"
+    ]
+  ],
+  "unused_uav_V2": [],
+  "q1_fixed_baseline_diagnosis": [
+    {
+      "variant": "all_constraints",
+      "status": "INFEASIBLE",
+      "hard_deadlines_enforced": true,
+      "uav_no_overlap_enforced": true,
+      "battery_no_overlap_enforced": true
+    },
+    {
+      "variant": "without_uav_no_overlap",
+      "status": "INFEASIBLE",
+      "hard_deadlines_enforced": true,
+      "uav_no_overlap_enforced": false,
+      "battery_no_overlap_enforced": true
+    },
+    {
+      "variant": "without_battery_no_overlap",
+      "status": "INFEASIBLE",
+      "hard_deadlines_enforced": true,
+      "uav_no_overlap_enforced": true,
+      "battery_no_overlap_enforced": false
+    },
+    {
+      "variant": "without_both_resource_no_overlap",
+      "status": "OPTIMAL",
+      "hard_deadlines_enforced": true,
+      "uav_no_overlap_enforced": false,
+      "battery_no_overlap_enforced": false,
+      "medical_deadline_violations": 0,
+      "first_batch_deadline_violations": 0,
+      "uav_overlap": 16,
+      "battery_overlap": 16,
+      "hard_lateness_total_s": 0
+    },
+    {
+      "variant": "without_hard_deadlines",
+      "status": "OPTIMAL",
+      "hard_deadlines_enforced": false,
+      "uav_no_overlap_enforced": true,
+      "battery_no_overlap_enforced": true,
+      "medical_deadline_violations": 1,
+      "first_batch_deadline_violations": 3,
+      "uav_overlap": 0,
+      "battery_overlap": 0,
+      "hard_lateness_total_s": 1742.1575484488494
+    }
+  ],
+  "tradeoff": [
+    {
+      "scenario": "plus_60s",
+      "allowed_makespan_s": 7421.934,
+      "solver_status": "FEASIBLE",
+      "F1_s": 0,
+      "F2_s": 7369.03914433708,
+      "energy_kwh": 69.89182100333905,
+      "sorties": 25,
+      "selected_multistop_routes": 4,
+      "max_stops_per_route": 2
+    },
+    {
+      "scenario": "plus_120s",
+      "allowed_makespan_s": 7481.934,
+      "solver_status": "FEASIBLE",
+      "F1_s": 0,
+      "F2_s": 7430.95914433708,
+      "energy_kwh": 69.74881804953,
+      "sorties": 25,
+      "selected_multistop_routes": 4,
+      "max_stops_per_route": 2
+    },
+    {
+      "scenario": "plus_300s",
+      "allowed_makespan_s": 7661.934,
+      "solver_status": "UNKNOWN_VALIDATED_BASELINE_ONLY",
+      "F1_s": 0,
+      "F2_s": 7361.933158195543,
+      "energy_kwh": 70.0227965612103,
+      "sorties": 25,
+      "selected_multistop_routes": 4,
+      "max_stops_per_route": 2
+    },
+    {
+      "scenario": "plus_1pct",
+      "allowed_makespan_s": 7435.553,
+      "solver_status": "FEASIBLE",
+      "F1_s": 0,
+      "F2_s": 7430.95914433708,
+      "energy_kwh": 69.92704569309272,
+      "sorties": 25,
+      "selected_multistop_routes": 4,
+      "max_stops_per_route": 2
+    },
+    {
+      "scenario": "plus_2pct",
+      "allowed_makespan_s": 7509.172,
+      "solver_status": "FEASIBLE",
+      "F1_s": 0,
+      "F2_s": 7430.95914433708,
+      "energy_kwh": 69.74881804953,
+      "sorties": 25,
+      "selected_multistop_routes": 4,
+      "max_stops_per_route": 2
+    }
+  ],
+  "solver_stages": [
+    {
+      "stage": "F1",
+      "seed": 20260924,
+      "status": "OPTIMAL",
+      "objective_integer": 0,
+      "best_bound": 0.0,
+      "runtime_s": 29.164236300000002,
+      "solutions_seen": 3,
+      "validated_seen": 3,
+      "active_candidates": 1800,
+      "quantization_max_s": 0.0009994287238441757
+    },
+    {
+      "stage": "F2",
+      "seed": 20260924,
+      "status": "FEASIBLE",
+      "objective_integer": 7556506,
+      "best_bound": 1960544.0,
+      "runtime_s": 183.1674759,
+      "solutions_seen": 12,
+      "validated_seen": 12,
+      "active_candidates": 1800,
+      "quantization_max_s": 0.0009994287238441757
+    },
+    {
+      "stage": "F3",
+      "seed": 20260924,
+      "status": "FEASIBLE",
+      "objective_integer": 70161522,
+      "best_bound": 63537970.0,
+      "runtime_s": 182.6972368,
+      "solutions_seen": 9,
+      "validated_seen": 9,
+      "active_candidates": 1800,
+      "quantization_max_s": 0.0009994287238441757
+    },
+    {
+      "stage": "F4",
+      "seed": 20260924,
+      "status": "FEASIBLE",
+      "objective_integer": 25,
+      "best_bound": 23.0,
+      "runtime_s": 183.1130369,
+      "solutions_seen": 3,
+      "validated_seen": 3,
+      "active_candidates": 1800,
+      "quantization_max_s": 0.0009994287238441757
+    }
+  ],
+  "resource_utilization": [
+    {
+      "aircraft_type": "A",
+      "uav_count": 4,
+      "uav_used": 4,
+      "uav_max_concurrent": 4,
+      "uav_mean_utilization": 0.5730255101289191,
+      "battery_count": 6,
+      "battery_used": 6,
+      "battery_max_concurrent": 6,
+      "battery_mean_busy_fraction": 0.6173163972653755,
+      "battery_charging_busy_fraction": 0.23529939051276275
+    },
+    {
+      "aircraft_type": "B",
+      "uav_count": 2,
+      "uav_used": 2,
+      "uav_max_concurrent": 2,
+      "uav_mean_utilization": 0.9329089331004291,
+      "battery_count": 4,
+      "battery_used": 4,
+      "battery_max_concurrent": 4,
+      "battery_mean_busy_fraction": 0.9068691122793404,
+      "battery_charging_busy_fraction": 0.4404146457291259
+    },
+    {
+      "aircraft_type": "C",
+      "uav_count": 2,
+      "uav_used": 2,
+      "uav_max_concurrent": 2,
+      "uav_mean_utilization": 0.9782969976811248,
+      "battery_count": 4,
+      "battery_used": 4,
+      "battery_max_concurrent": 4,
+      "battery_mean_busy_fraction": 0.9974715972488828,
+      "battery_charging_busy_fraction": 0.5083230984083204
+    }
+  ],
+  "official_template": {
+    "official_excel_roundtrip": "PASS",
+    "Q1_sheet_unchanged": true,
+    "sortie_rows": 25,
+    "box_rows": 80
+  },
+  "runtime_s": 823.0617433000007,
+  "stop_reason": "F1=0，触发 Stop A；未进入 2500–4000 条第二档候选池"
+}

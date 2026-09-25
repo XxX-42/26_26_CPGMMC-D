@@ -1,0 +1,36 @@
+{
+  "status": "DECLARED_MODEL_ASSUMPTION",
+  "rationale": "题面给定等效航程、能耗分解及爬升效率，但没有逐项展开 E_hor 与 E_up；官方 D 题答疑区针对水平能耗问题答复“请根据题目自行理解”，因此本文依据参数物理意义建立上述模型。",
+  "official_qa": {
+    "url": "https://www.shumo.com/forum/forum.php?mod=viewthread&tid=251930",
+    "question": "数据中没有给出水平巡航能耗具体数据",
+    "expert_reply": "请根据题目自行理解",
+    "scope": "允许参赛队依据题目自行建模；不确认本文具体分项公式"
+  },
+  "official_rules": {
+    "range_m": "L_g(q)=L0_g-(L0_g-LF_g)*(q/Q_g)^(3/2)",
+    "segment_decomposition": "E_segment=E_horizontal+E_climb; descent adds no separate energy",
+    "reserve": "E_roundtrip <= (1-rho_g)*E_use_g"
+  },
+  "declared_formulas": {
+    "horizontal_kwh": "E_use_g*d_ij/L_g(q)",
+    "climb_kwh": "(m_empty_g+q)*9.80665*h_up_ij/(eta_up_g*3.6e6)",
+    "roundtrip_kwh": "E(O01,Si,q)+E(Si,O01,0)"
+  },
+  "raw_fields": {
+    "m_empty_g": "含电池空载总质量（kg）",
+    "eta_up_g": "爬升能耗效率",
+    "E_use_g": "电池可用能量（kWh）",
+    "L0_g": "空载标准航程（m）",
+    "LF_g": "满载标准航程（m）",
+    "Q_g": "最大载货质量（kg）",
+    "rho_g": "返航电量下限（%） / 100"
+  },
+  "internal_units": {
+    "mass": "kg",
+    "distance_and_height": "m",
+    "energy": "kWh",
+    "soc": "0–1"
+  },
+  "energy_unit_tests_pass": true
+}

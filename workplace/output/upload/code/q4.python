@@ -1,0 +1,506 @@
+# AI 辅助编程声明：本程序及代码在人工智能工具辅助下完成，提交前由参赛队审查。
+# 工具名称：Codex（项目记录可核实）；开发机构：OpenAI。
+# 版本/模型：待参赛队根据实际使用记录核实；版本发布日期：待核实。
+# 另有早期 Deep Research 路线报告；其产品型号及发布日期待参赛队核实。
+# 本副本仅增加以上注释；正式冻结源码及求解结果均未修改。
+"""华为杯 D 题问题四：固定 Q3 任务下的精确无标签分区。运行 python src/q4.python。"""
+from __future__ import annotations
+
+import csv
+import hashlib
+import heapq
+import json
+import math
+from collections import Counter, defaultdict
+from fractions import Fraction
+from pathlib import Path
+
+import matplotlib
+matplotlib.use('Agg')
+import matplotlib.pyplot as plt
+from openpyxl import Workbook, load_workbook
+from openpyxl.styles import Font, PatternFill
+from openpyxl.utils import get_column_letter
+
+ROOT=Path(__file__).resolve().parents[1]
+DATA=ROOT/'data';Q3=ROOT/'output'/'q3_final';OUT=ROOT/'output'/'q4'
+TYPES=['A_UAV','B_UAV','C_UAV','A_BATTERY','B_BATTERY','C_BATTERY','RELAY_UAV','RELAY_COMPONENT']
+SERVICES=[f'S{i:03d}' for i in range(1,16)]
+
+def jd(p):return json.loads(Path(p).read_text(encoding='utf-8'))
+def sha(p):
+    with Path(p).open('rb') as f:return hashlib.file_digest(f,'sha256').hexdigest()
+def write_json(name,value):
+    (OUT/name).write_text(json.dumps(value,ensure_ascii=False,indent=2,default=str),encoding='utf-8')
+def write_csv(name,rows,fields=None):
+    fields=fields or (list(rows[0]) if rows else ['status'])
+    with (OUT/name).open('w',newline='',encoding='utf-8-sig') as f:
+        w=csv.DictWriter(f,fields,extrasaction='ignore');w.writeheader();w.writerows(rows)
+def source(name):
+    hits=list(DATA.rglob(name))
+    if len(hits)!=1:raise RuntimeError(f'官方数据定位异常 {name}: {len(hits)}')
+    return hits[0]
+def section_rows(path,marker):
+    wb=load_workbook(path,read_only=True,data_only=True)
+    try:
+        for sheet in wb:
+            rows=list(sheet.iter_rows(values_only=True))
+            for i,head in enumerate(rows):
+                if marker in head:
+                    result=[]
+                    for row in rows[i+1:]:
+                        if all(v is None for v in row):break
+                        result.append(dict(zip(head,row)))
+                    return result
+    finally:wb.close()
+    raise RuntimeError(f'官方附件缺少表头 {marker}')
+
+def verify_q3_final_freeze():
+    m=jd(Q3/'q3_final_freeze_manifest.json')
+    if any(m.get(k)!=v for k,v in [('Q3_FINAL_FREEZE','PASS'),('Q3_VALID',True),('Q4_K3_READY',True)]):
+        raise RuntimeError('Q3 Final 门禁未通过')
+    if sha(ROOT/'src/q3.python')!=m['source_sha256']:raise RuntimeError('Q3 源码哈希变化')
+    for rel,digest in m['files'].items():
+        if sha(Q3/rel)!=digest:raise RuntimeError(f'Q3 冻结结果哈希变化：{rel}')
+    for rel,digest in m['upstream'].items():
+        if sha(ROOT/rel)!=digest:raise RuntimeError(f'Q1/Q2 上游哈希变化：{rel}')
+    s=jd(Q3/'q3_final_summary.json')
+    if not s['Q3_VALID'] or s['ordinary_total_tardiness_s']>1e-8 or s['strict_component_count']<3:
+        raise RuntimeError('Q3 Final 结果不满足 Q4 门禁')
+    return m
+
+def load_inventory():
+    """从官方逐架清单和共享库存表重新读取八类资源。"""
+    transport=source('运输无人机数据.xlsx');relay=source('中继无人机数据.xlsx')
+    u=Counter(r['机型编号'] for r in section_rows(transport,'无人机编号'))
+    b={r['机型编号']:int(r['共享电池组总数（组）']) for r in section_rows(transport,'共享电池组总数（组）')}
+    inv={f'{g}_UAV':u[g] for g in 'ABC'}
+    inv.update({f'{g}_BATTERY':b[g] for g in 'ABC'})
+    inv['RELAY_UAV']=len(section_rows(relay,'中继无人机编号'))
+    inv['RELAY_COMPONENT']=int(section_rows(relay,'共享能源组件总数（组）')[0]['共享能源组件总数（组）'])
+    if set(inv)!=set(TYPES) or any(v<=0 for v in inv.values()):raise RuntimeError('官方库存异常')
+    return inv
+
+def make_snapshot():
+    """冻结通信关系、服务区及全部任务起止时刻，后续优化仅用本快照。"""
+    original=jd(Q3/'q3_final_solution.json')
+    t=[]
+    for r in original['transport_routes']:
+        t.append({'task_id':r['sortie_id'],'type':r['g'],'services':sorted({x[0] for x in r['groups']}),
+                  'box_ids':list(r['box_ids']),'mass_kg':r['mass_kg'],
+                  'start_s':r['start_s'],'return_s':r['return_s'],'uav_end_s':r['return_s'],
+                  'battery_full_s':r['full_s'],'energy_kwh':r['energy_kwh']})
+    coverage=defaultdict(set)
+    communication=[]
+    for row in original['communication_intervals']:
+        communication.append({'transport_sortie_id':row['transport_sortie_id'],
+                              'relay_sortie_id':row['relay_sortie_id'],'mode':row['mode'],
+                              'start_s':row['start_s'],'end_s':row['end_s']})
+        if row['mode']=='RELAY':coverage[row['relay_sortie_id']].add(row['transport_sortie_id'])
+    r=[]
+    for x in original['relay_sorties']:
+        r.append({'task_id':x['sortie_id'],'covered_transport_sorties':sorted(coverage[x['sortie_id']]),
+                  'start_s':x['start_s'],'ready_s':x['link_ready_s'],'service_end_s':x['service_end_s'],
+                  'return_s':x['return_s'],'relay_release_s':x['uav_release_s'],
+                  'component_full_s':x['component_full_s'],'lon':x['lon'],'lat':x['lat'],
+                  'alt_m':x['alt_m'],'energy_kwh':x['energy_kwh']})
+    snap={'q3_solution_sha256':sha(Q3/'q3_final_solution.json'),
+          'transport_tasks':t,'relay_tasks':r,'communication_intervals':communication}
+    write_json('q4_fixed_task_snapshot.json',snap)
+    return jd(OUT/'q4_fixed_task_snapshot.json')
+
+def build_components(snapshot):
+    parent={s:s for s in SERVICES};edges=[]
+    def find(x):
+        while parent[x]!=x:parent[x]=parent[parent[x]];x=parent[x]
+        return x
+    def join(items,reason):
+        items=sorted(items)
+        for x in items[1:]:parent[find(x)]=find(items[0]);edges.append({'a':items[0],'b':x,'reason':reason})
+    by_tid={t['task_id']:t for t in snapshot['transport_tasks']}
+    for t in snapshot['transport_tasks']:join(t['services'],f"transport:{t['task_id']}")
+    for r in snapshot['relay_tasks']:
+        linked=set().union(*(by_tid[t]['services'] for t in r['covered_transport_sorties'])) if r['covered_transport_sorties'] else set()
+        join(linked,f"relay:{r['task_id']}")
+    groups=defaultdict(list)
+    for s in SERVICES:groups[find(s)].append(s)
+    values=sorted((sorted(x) for x in groups.values()),key=lambda x:x[0])
+    comps=[];service_comp={}
+    for i,services in enumerate(values,1):
+        cid=f'C{i:02d}'
+        for s in services:service_comp[s]=i-1
+        tids=sorted(t['task_id'] for t in snapshot['transport_tasks'] if set(t['services'])<=set(services))
+        rids=sorted(r['task_id'] for r in snapshot['relay_tasks'] if set(r['covered_transport_sorties'])<=set(tids))
+        comps.append({'component_id':cid,'services':services,'transport_sorties':tids,'relay_sorties':rids})
+    if len(comps)<3:raise RuntimeError('严格依赖分量不足 3，禁止 Q4')
+    write_csv('q4_dependency_components.csv',[{'component_id':c['component_id'],
+              'service_areas':','.join(c['services']),'transport_sorties':','.join(c['transport_sorties']),
+              'relay_sorties':','.join(c['relay_sorties'])} for c in comps])
+    (OUT/'q4_dependency_graph.md').write_text('# 固定任务 must-link 依赖图\n\n'+
+        '同架次运输服务区及同一不可拆中继任务保障的服务区均连接。\n\n'+
+        '\n'.join(f"- {c['component_id']}: {', '.join(c['services'])}; 运输 {len(c['transport_sorties'])} 架次；中继 {len(c['relay_sorties'])} 架次" for c in comps)+'\n',encoding='utf-8')
+    return comps,service_comp,edges
+
+def intervals_for(tasks,relays):
+    arr=defaultdict(list)
+    for t in tasks:
+        g=t['type'];arr[f'{g}_UAV'].append((t['start_s'],t['uav_end_s'],t['task_id']))
+        arr[f'{g}_BATTERY'].append((t['start_s'],t['battery_full_s'],t['task_id']))
+    for r in relays:
+        arr['RELAY_UAV'].append((r['start_s'],r['relay_release_s'],r['task_id']))
+        arr['RELAY_COMPONENT'].append((r['start_s'],r['component_full_s'],r['task_id']))
+    return arr
+
+def peak_and_coloring(intervals,prefix):
+    """半开区间：同一时刻释放先于申请；贪心着色达到峰值下界。"""
+    events=[]
+    for a,b,tid in intervals:
+        if not 0<=a<b:raise RuntimeError(f'非法任务占用区间：{tid}')
+        events.extend([(a,1,tid),(b,0,tid)])
+    events.sort(key=lambda x:(x[0],x[1],x[2]))
+    active=set();peak=0;peak_t=None;peak_tasks=[]
+    for t,kind,tid in events:
+        if kind==0:active.remove(tid)
+        else:
+            active.add(tid)
+            if len(active)>peak:peak=len(active);peak_t=t;peak_tasks=sorted(active)
+    busy=[];free=[];colors=[];next_id=0
+    for a,b,tid in sorted(intervals,key=lambda v:(v[0],v[1],v[2])):
+        while busy and busy[0][0]<=a:
+            _,color=heapq.heappop(busy);heapq.heappush(free,color)
+        if free:color=heapq.heappop(free)
+        else:color=next_id;next_id+=1
+        heapq.heappush(busy,(b,color))
+        colors.append({'resource_id':f'{prefix}-{color+1:02d}','task_id':tid,
+                       'start_s':a,'end_s':b})
+    if next_id!=peak:raise RuntimeError('区间着色未达到并发下界')
+    return {'requirement':peak,'peak_time_s':peak_t,'peak_tasks':peak_tasks,'coloring':colors}
+
+def precompute_subsets(snapshot,comps,service_comp):
+    ts=snapshot['transport_tasks'];rs=snapshot['relay_tasks'];m=len(comps)
+    tmask={t['task_id']:1<<service_comp[t['services'][0]] for t in ts}
+    rmask={r['task_id']:1<<service_comp[next(t for t in ts if t['task_id']==r['covered_transport_sorties'][0])['services'][0]]
+           for r in rs if r['covered_transport_sorties']}
+    if len(rmask)!=len(rs):raise RuntimeError('某中继任务没有保障对象，不能分配任务组')
+    cache={}
+    for mask in range(1,1<<m):
+        chosen_t=[t for t in ts if tmask[t['task_id']]&mask]
+        chosen_r=[r for r in rs if rmask[r['task_id']]&mask]
+        intervals=intervals_for(chosen_t,chosen_r)
+        peaks={typ:peak_and_coloring(intervals[typ],f'M{mask}-{typ}') for typ in TYPES}
+        workload=sum((Fraction(str(t['uav_end_s']))-Fraction(str(t['start_s'])) for t in chosen_t),Fraction(0))
+        workload+=sum((Fraction(str(r['relay_release_s']))-Fraction(str(r['start_s'])) for r in chosen_r),Fraction(0))
+        cache[mask]={'mask':mask,'services':sorted(s for c in range(m) if mask&(1<<c) for s in comps[c]['services']),
+                     'transport_sorties':[t['task_id'] for t in chosen_t],
+                     'relay_sorties':[r['task_id'] for r in chosen_r],
+                     'box_count':sum(len(t['box_ids']) for t in chosen_t),
+                     'cargo_mass_kg':sum(t['mass_kg'] for t in chosen_t),
+                     'workload':workload,'resources':{typ:peaks[typ]['requirement'] for typ in TYPES},
+                     'peaks':peaks}
+    write_json('q4_subset_resource_cache.json',{str(mask):{
+        k:(str(v) if k=='workload' else v) for k,v in row.items() if k!='peaks'} for mask,row in cache.items()})
+    return cache
+
+def rgs_partitions(m,k):
+    """无标签 RGS，首个分量固定组 0。"""
+    arr=[0]*m
+    def visit(i,highest):
+        if i==m:
+            if highest+1==k:
+                masks=[0]*k
+                for j,g in enumerate(arr):masks[g]|=1<<j
+                yield tuple(masks)
+            return
+        for g in range(min(highest+1,k-1)+1):
+            arr[i]=g
+            yield from visit(i+1,max(highest,g))
+    yield from visit(1,0)
+
+def stirling(n,k):
+    tab=[[0]*(k+1) for _ in range(n+1)];tab[0][0]=1
+    for i in range(1,n+1):
+        for j in range(1,min(i,k)+1):tab[i][j]=j*tab[i-1][j]+tab[i-1][j-1]
+    return tab[n][k]
+
+def evaluate_partition(masks,cache,inventory,global_row):
+    split={typ:sum(cache[mask]['resources'][typ] for mask in masks) for typ in TYPES}
+    gap={typ:max(0,split[typ]-inventory[typ]) for typ in TYPES}
+    red={typ:split[typ]-global_row['resources'][typ] for typ in TYPES}
+    if any(v<0 for v in red.values()):raise RuntimeError('独立分组资源需求小于不分组并发峰值')
+    workloads=[cache[mask]['workload'] for mask in masks];total=sum(workloads,Fraction(0))
+    objectives=(sum((Fraction(gap[t],inventory[t]) for t in TYPES),Fraction(0)),
+                sum((Fraction(red[t],inventory[t]) for t in TYPES),Fraction(0)),
+                (max(workloads)-min(workloads))/total)
+    tie=tuple(cache[mask]['services'][0] for mask in masks)
+    return {'masks':masks,'split':split,'gap':gap,'redundancy':red,
+            'workloads':workloads,'objectives':objectives,'tie':tie}
+
+def solve_exact(k,comps,cache,inventory):
+    m=len(comps);global_row=cache[(1<<m)-1];best=None;best_layer_counts=[0,0,0];count=0
+    for masks in rgs_partitions(m,k):
+        count+=1;candidate=evaluate_partition(masks,cache,inventory,global_row)
+        score=(*candidate['objectives'],candidate['tie'])
+        if best is None or score<(*best['objectives'],best['tie']):best=candidate
+    expected=stirling(m,k)
+    if count!=expected or best is None:raise RuntimeError(f'K={k} 精确枚举数错误：{count}/{expected}')
+    best['K']=k;best['partitions_checked']=count;best['stirling_expected']=expected;best['EXACT']=True
+    return best
+
+def fraction_str(x):return f'{x.numerator}/{x.denominator}'
+def summary_object(best,cache):
+    return {'K':best['K'],'partitions_checked':best['partitions_checked'],
+            'stirling_expected':best['stirling_expected'],'EXACT':best['EXACT'],
+            'objective_exact':[fraction_str(x) for x in best['objectives']],
+            'objective_decimal':[float(x) for x in best['objectives']],
+            'split_requirement':best['split'],'gap':best['gap'],'redundancy':best['redundancy'],
+            'groups':[{'group':j,'mask':mask,'services':cache[mask]['services'],
+                       'transport_sorties':cache[mask]['transport_sorties'],
+                       'relay_sorties':cache[mask]['relay_sorties'],
+                       'box_count':cache[mask]['box_count'],'cargo_mass_kg':cache[mask]['cargo_mass_kg'],
+                       'workload_resource_s':float(cache[mask]['workload']),
+                       'workload_exact':fraction_str(cache[mask]['workload']),
+                       'resources':cache[mask]['resources']} for j,mask in enumerate(best['masks'],1)]}
+
+def partition_rows(best,cache):
+    rows=[]
+    for j,mask in enumerate(best['masks'],1):
+        c=cache[mask]
+        rows.append({'K':best['K'],'group':j,'services':','.join(c['services']),
+                     'service_count':len(c['services']),'box_count':c['box_count'],
+                     'cargo_mass_kg':c['cargo_mass_kg'],'transport_sorties':len(c['transport_sorties']),
+                     'relay_sorties':len(c['relay_sorties']),
+                     'workload_resource_s':float(c['workload']),**c['resources']})
+    return rows
+
+def assignment_rows(best,cache):
+    rows=[]
+    for j,mask in enumerate(best['masks'],1):
+        for typ in TYPES:
+            peak=cache[mask]['peaks'][typ]
+            for x in peak['coloring']:
+                rows.append({'K':best['K'],'group':j,'resource_type':typ,
+                             'resource_id':f"K{best['K']}-G{j}-{typ}-{x['resource_id'].split('-')[-1]}",
+                             'task_id':x['task_id'],'start_s':x['start_s'],'end_s':x['end_s']})
+    return rows
+
+def validate_partition(best,cache,snapshot,comps,assignment):
+    groups=[cache[mask] for mask in best['masks']];svc=[s for g in groups for s in g['services']]
+    assigned_t=[t for g in groups for t in g['transport_sorties']]
+    assigned_r=[r for g in groups for r in g['relay_sorties']]
+    frozen=jd(Q3/'q3_final_solution.json')
+    source_t={x['sortie_id']:x for x in frozen['transport_routes']}
+    source_r={x['sortie_id']:x for x in frozen['relay_sorties']}
+    source_comm=[(x['transport_sortie_id'],x['relay_sortie_id'],x['mode'],x['start_s'],x['end_s'])
+                 for x in frozen['communication_intervals']]
+    snap_comm=[(x['transport_sortie_id'],x['relay_sortie_id'],x['mode'],x['start_s'],x['end_s'])
+               for x in snapshot['communication_intervals']]
+    transport_changes=0;relay_changes=0;time_changes=0
+    for t in snapshot['transport_tasks']:
+        o=source_t[t['task_id']]
+        transport_changes+=int(t['type']!=o['g'] or t['services']!=sorted({x[0] for x in o['groups']}) or t['box_ids']!=o['box_ids'])
+        time_changes+=int((t['start_s'],t['return_s'],t['battery_full_s'])!=(o['start_s'],o['return_s'],o['full_s']))
+    for r in snapshot['relay_tasks']:
+        o=source_r[r['task_id']]
+        relay_changes+=int((r['lon'],r['lat'],r['alt_m'])!=(o['lon'],o['lat'],o['alt_m']))
+        time_changes+=int((r['start_s'],r['service_end_s'],r['return_s'],r['relay_release_s'],r['component_full_s'])!=
+                          (o['start_s'],o['service_end_s'],o['return_s'],o['uav_release_s'],o['component_full_s']))
+    counts={'service_area_total':len(svc),'service_missing':len(set(SERVICES)-set(svc)),
+            'service_duplicated':sum(v-1 for v in Counter(svc).values() if v>1),
+            'empty_groups':sum(not g['services'] for g in groups),
+            'transport_must_link_violations':0,'relay_dependency_violations':0,
+            'fixed_Q3_transport_changes':transport_changes,'fixed_Q3_relay_changes':relay_changes,
+            'fixed_Q3_time_changes':time_changes,'fixed_Q3_communication_changes':int(source_comm!=snap_comm),
+            'cross_group_resource_sharing':0,'resource_assignment_conflicts':0,
+            'resource_requirement_underestimated':0,
+            'transport_task_missing':len(set(t['task_id'] for t in snapshot['transport_tasks'])-set(assigned_t)),
+            'relay_task_missing':len(set(r['task_id'] for r in snapshot['relay_tasks'])-set(assigned_r)),
+            'transport_task_duplicated':sum(v-1 for v in Counter(assigned_t).values() if v>1),
+            'relay_task_duplicated':sum(v-1 for v in Counter(assigned_r).values() if v>1)}
+    where={s:j for j,g in enumerate(groups,1) for s in g['services']}
+    by_tid={t['task_id']:t for t in snapshot['transport_tasks']}
+    for t in snapshot['transport_tasks']:
+        if len({where[s] for s in t['services']})!=1:counts['transport_must_link_violations']+=1
+    for r in snapshot['relay_tasks']:
+        links={where[s] for tid in r['covered_transport_sorties'] for s in by_tid[tid]['services']}
+        if len(links)!=1:counts['relay_dependency_violations']+=1
+    ids=defaultdict(list)
+    for a in assignment:ids[a['resource_id']].append(a)
+    for rid,entries in ids.items():
+        if len({e['group'] for e in entries})!=1:counts['cross_group_resource_sharing']+=1
+        entries.sort(key=lambda e:e['start_s'])
+        for left,right in zip(entries,entries[1:]):
+            if right['start_s']<left['end_s']-1e-9:counts['resource_assignment_conflicts']+=1
+    for j,mask in enumerate(best['masks'],1):
+        selected_t=[t for t in snapshot['transport_tasks'] if t['task_id'] in cache[mask]['transport_sorties']]
+        selected_r=[r for r in snapshot['relay_tasks'] if r['task_id'] in cache[mask]['relay_sorties']]
+        fresh=intervals_for(selected_t,selected_r)
+        for typ in TYPES:
+            rows=[x for x in assignment if x['group']==j and x['resource_type']==typ]
+            used={x['resource_id'] for x in rows}
+            actual=Counter((x['start_s'],x['end_s'],x['task_id']) for x in rows)
+            expected=Counter(fresh[typ])
+            peak=peak_and_coloring(fresh[typ],f'VALIDATE-{j}-{typ}')['requirement']
+            if len(used)!=peak or actual!=expected or peak!=cache[mask]['resources'][typ]:
+                counts['resource_requirement_underestimated']+=1
+    counts['Q4_VALID']=counts['service_area_total']==15 and all(v==0 for k,v in counts.items() if k not in ('Q4_VALID','service_area_total'))
+    return counts
+
+def sheet_fingerprint(sheet):
+    return tuple((c.coordinate,c.value,c.data_type,c.number_format,c.style_id)
+                 for row in sheet.iter_rows() for c in row)
+
+def export_template(k2,k3,cache):
+    src=Q3/'结果提交模板_Q1Q2Q3_最终版.xlsx';dest=OUT/'结果提交模板_Q1Q2Q3Q4已填写.xlsx'
+    wb=load_workbook(src);target=wb['Q4_分区配置']
+    headers=[target.cell(1,j).value for j in range(1,12)]
+    expected=['K（2或3）','任务组编号','服务区列表','A型运输无人机数','B型运输无人机数','C型运输无人机数',
+              'A型电池组数','B型电池组数','C型电池组数','中继无人机数','中继能源组件数']
+    if headers!=expected:raise RuntimeError(f'官方 Q4 表头变化：{headers}')
+    for row in target.iter_rows(min_row=2,max_col=11):
+        for cell in row:cell.value=None
+    expected_rows=[]
+    for best in (k2,k3):
+        for j,mask in enumerate(best['masks'],1):
+            c=cache[mask];r=c['resources']
+            expected_rows.append([best['K'],j,','.join(c['services']),r['A_UAV'],r['B_UAV'],r['C_UAV'],
+                                  r['A_BATTERY'],r['B_BATTERY'],r['C_BATTERY'],r['RELAY_UAV'],r['RELAY_COMPONENT']])
+    for i,row in enumerate(expected_rows,2):
+        for j,val in enumerate(row,1):target.cell(i,j).value=val
+    wb.save(dest);wb.close()
+    before=load_workbook(src);after=load_workbook(dest)
+    preserved=all(sheet_fingerprint(before[s])==sheet_fingerprint(after[s]) for s in before.sheetnames if s!='Q4_分区配置')
+    actual=[[after['Q4_分区配置'].cell(i,j).value for j in range(1,12)] for i in range(2,2+len(expected_rows))]
+    before.close();after.close()
+    ok=preserved and actual==expected_rows and {row[0] for row in actual}=={2,3}
+    if not ok:raise RuntimeError('官方模板回读或 Q1/Q2/Q3 逐单元格不变核验失败')
+    return {'official_excel_roundtrip':'PASS','Q1_Q2_Q3_sheets_unchanged':True,'q4_rows':len(actual),
+            'sha256':sha(dest)}
+
+def save_workbook(tables):
+    wb=Workbook();wb.remove(wb.active)
+    for title,rows in tables:
+        sheet=wb.create_sheet(title)
+        if not rows:continue
+        cols=list(rows[0]);sheet.append(cols)
+        for row in rows:sheet.append([row.get(c) for c in cols])
+        sheet.freeze_panes='A2'
+        for c in sheet[1]:c.font=Font(bold=True,color='FFFFFF');c.fill=PatternFill('solid',fgColor='17365D')
+        for j,col in enumerate(cols,1):sheet.column_dimensions[get_column_letter(j)].width=min(55,max(15,len(col)*1.8))
+    wb.save(OUT/'q4_results.xlsx')
+
+def figures(k2,k3,cache,inventory):
+    figdir=OUT/'figures';figdir.mkdir(exist_ok=True)
+    coords={}
+    for row in section_rows(source('调度中心与服务区.xlsx'),'服务区编号'):
+        coords[row['服务区编号']]=(float(row['经度（°）']),float(row['纬度（°）']))
+    for best in (k2,k3):
+        fig,ax=plt.subplots(figsize=(7,5))
+        for j,mask in enumerate(best['masks'],1):
+            xs=[coords[s][0] for s in cache[mask]['services']];ys=[coords[s][1] for s in cache[mask]['services']]
+            ax.scatter(xs,ys,s=70,label=f'Group {j}')
+            for s,x,y in zip(cache[mask]['services'],xs,ys):ax.annotate(s,(x,y),fontsize=7,xytext=(3,3),textcoords='offset points')
+        ax.set_xlabel('Longitude');ax.set_ylabel('Latitude');ax.legend();fig.tight_layout()
+        fig.savefig(figdir/f"q4_k{best['K']}_partition_map.png",dpi=160);plt.close(fig)
+    x=range(len(TYPES));width=.25
+    fig,ax=plt.subplots(figsize=(11,4))
+    for offset,row,label in [(-width,{t:inventory[t] for t in TYPES},'Inventory'),(0,k2['split'],'K2'),(width,k3['split'],'K3')]:
+        ax.bar([i+offset for i in x],[row[t] for t in TYPES],width,label=label)
+    ax.set_xticks(list(x),TYPES,rotation=30,ha='right');ax.legend();fig.tight_layout()
+    fig.savefig(figdir/'q4_resource_comparison.png',dpi=160);plt.close(fig)
+    fig,ax=plt.subplots(figsize=(10,4))
+    ax.bar([i-.2 for i in x],[k2['gap'][t] for t in TYPES],.2,label='K2 gap')
+    ax.bar([i for i in x],[k3['gap'][t] for t in TYPES],.2,label='K3 gap')
+    ax.bar([i+.2 for i in x],[k3['redundancy'][t] for t in TYPES],.2,label='K3 redundancy')
+    ax.set_xticks(list(x),TYPES,rotation=30,ha='right');ax.legend();fig.tight_layout()
+    fig.savefig(figdir/'q4_gap_redundancy.png',dpi=160);plt.close(fig)
+    fig,ax=plt.subplots(figsize=(7,4))
+    ax.bar([f'K{b["K"]}-G{j}' for b in (k2,k3) for j in range(1,b['K']+1)],
+           [float(v) for b in (k2,k3) for v in b['workloads']]);ax.set_ylabel('Resource-seconds')
+    fig.tight_layout();fig.savefig(figdir/'q4_workload_balance.png',dpi=160);plt.close(fig)
+
+def main():
+    print('==============================\nQ4 正式求解开始\n==============================',flush=True)
+    OUT.mkdir(parents=True,exist_ok=True)
+    print('[0/10] 核验 Q3 Final Freeze',flush=True);manifest=verify_q3_final_freeze()
+    print('[1/10] 读取固定 Q3 任务和官方库存',flush=True);inventory=load_inventory();snapshot=make_snapshot()
+    snapshot_hash=sha(OUT/'q4_fixed_task_snapshot.json')
+    print('[2/10] 构建 transport/relay 依赖图',flush=True)
+    comps,service_comp,edges=build_components(snapshot)
+    print(f'[3/10] 压缩 must-link components: {len(comps)}',flush=True)
+    print('[4/10] 预计算 subset 资源需求',flush=True);cache=precompute_subsets(snapshot,comps,service_comp)
+    print('[5/10] 精确枚举 K=2',flush=True);k2=solve_exact(2,comps,cache,inventory)
+    print('[6/10] 精确枚举 K=3',flush=True);k3=solve_exact(3,comps,cache,inventory)
+    s2=summary_object(k2,cache);s3=summary_object(k3,cache)
+    write_json('q4_k2_all_best.json',s2);write_json('q4_k3_all_best.json',s3)
+    rows2=partition_rows(k2,cache);rows3=partition_rows(k3,cache)
+    write_csv('q4_k2_partition.csv',rows2);write_csv('q4_k3_partition.csv',rows3)
+    write_csv('q4_k2_resources.csv',[{'group':r['group'],**{t:r[t] for t in TYPES}} for r in rows2])
+    write_csv('q4_k3_resources.csv',[{'group':r['group'],**{t:r[t] for t in TYPES}} for r in rows3])
+    print('[7/10] 构造独立资源编号分配',flush=True)
+    assignments=assignment_rows(k2,cache)+assignment_rows(k3,cache)
+    write_csv('q4_resource_assignment.csv',assignments)
+    print('[8/10] Validator',flush=True)
+    v2=validate_partition(k2,cache,snapshot,comps,assignment_rows(k2,cache))
+    v3=validate_partition(k3,cache,snapshot,comps,assignment_rows(k3,cache))
+    if not v2['Q4_VALID'] or not v3['Q4_VALID']:raise RuntimeError(f'Q4 Validator 失败：{v2}, {v3}')
+    gap_rows=[];gap_lines=['# 独立分组资源缺口原因','']
+    for best in (k2,k3):
+        for typ in TYPES:
+            row={'K':best['K'],'resource_type':typ,'inventory':inventory[typ],
+                 'global_peak':cache[(1<<len(comps))-1]['resources'][typ],
+                 'split_requirement':best['split'][typ],'gap':best['gap'][typ],
+                 'redundancy':best['redundancy'][typ]}
+            gap_rows.append(row)
+            if row['gap']:
+                detail='; '.join(f"G{j}: 峰值 {cache[mask]['resources'][typ]} 于 {cache[mask]['peaks'][typ]['peak_time_s'] if cache[mask]['peaks'][typ]['peak_time_s'] is not None else '无占用'}s，任务 {','.join(cache[mask]['peaks'][typ]['peak_tasks'])}" for j,mask in enumerate(best['masks'],1))
+                gap_lines.append(f"- K={best['K']} {typ}: 各组需求 {row['split_requirement']} > 官方库存 {row['inventory']}，缺口 {row['gap']}。{detail}")
+    if len(gap_lines)==2:gap_lines.append('两个分区均无官方库存缺口。')
+    write_csv('q4_resource_gap.csv',gap_rows)
+    (OUT/'q4_resource_gap_explanation.md').write_text('\n'.join(gap_lines)+'\n',encoding='utf-8')
+    comp_rows=[{'K':b['K'],'F1_gap_exact':fraction_str(b['objectives'][0]),
+                'F2_redundancy_exact':fraction_str(b['objectives'][1]),
+                'F3_balance_exact':fraction_str(b['objectives'][2]),
+                'total_gap':sum(b['gap'].values()),'total_redundancy':sum(b['redundancy'].values()),
+                'partitions_checked':b['partitions_checked']} for b in (k2,k3)]
+    write_csv('q4_comparison.csv',comp_rows)
+    (OUT/'q4_comparison.md').write_text('# K2 与 K3 对比\n\n'+
+        '\n'.join(f"- K={x['K']}: 归一化缺口 {x['F1_gap_exact']}；冗余 {x['F2_redundancy_exact']}；工作量不均衡 {x['F3_balance_exact']}；枚举 {x['partitions_checked']}。" for x in comp_rows)+'\n',encoding='utf-8')
+    print('[9/10] Excel/图表/报告导出',flush=True)
+    excel=export_template(k2,k3,cache)
+    save_workbook([('K2分区',rows2),('K3分区',rows3),('资源缺口',gap_rows),('资源着色证据',assignments),('比较',comp_rows)])
+    figures(k2,k3,cache,inventory)
+    validation={'Q4_K2_VALID':True,'Q4_K3_VALID':True,'Q4_K2_EXACT':True,'Q4_K3_EXACT':True,
+                'K2':v2,'K3':v3,'excel_roundtrip':excel,'fixed_snapshot_sha256':snapshot_hash}
+    write_json('q4_validation.json',validation)
+    (OUT/'q4_validation.md').write_text('# Q4 独立 Validator\n\n'+
+        '\n'.join(f'- K={k}: {val}' for k,val in [(2,v2),(3,v3)])+'\n',encoding='utf-8')
+    summary={'Q3_FINAL_FREEZE':'PASS','Q4_K2_VALID':True,'Q4_K3_VALID':True,
+             'Q4_K2_EXACT':True,'Q4_K3_EXACT':True,'component_count':len(comps),
+             'inventory':inventory,'global_requirement':cache[(1<<len(comps))-1]['resources'],
+             'K2':s2,'K3':s3,'excel':excel}
+    write_json('q4_summary.json',summary)
+    lines=['# 问题四求解结果','',
+           '## 1. Q3 冻结','Q3 Final 任务、时刻和通信保障关系未变；全部资源占用使用固定快照。','',
+           '## 2. 依赖图',f"运输同架次及固定中继保障连接后有 {len(comps)} 个不可拆分量。",'']
+    for c in comps:lines.append(f"- {c['component_id']}: {', '.join(c['services'])}")
+    for best in (k2,k3):
+        lines.extend(['',f"## 3. K={best['K']} 结果",''])
+        for j,mask in enumerate(best['masks'],1):
+            c=cache[mask]
+            lines.append(f"- 组 {j}: {', '.join(c['services'])}；箱 {c['box_count']}；质量 {c['cargo_mass_kg']:.3f} kg；运输 {len(c['transport_sorties'])} 架次；中继 {len(c['relay_sorties'])} 架次；工作量 {float(c['workload']):.3f} resource-s；资源 {c['resources']}。")
+        lines.append(f"- 资源缺口 {best['gap']}；隔离冗余 {best['redundancy']}；F1/F2/F3 = {', '.join(map(fraction_str,best['objectives']))}。")
+    lines.extend(['','## 5. K=2 vs K=3',f"K2 枚举 {k2['partitions_checked']}，K3 枚举 {k3['partitions_checked']}；资源缺口分别 {sum(k2['gap'].values())}、{sum(k3['gap'].values())}。",'',
+                  '## 6. 精确性','在固定 Q3 任务和本文 must-link 定义下，两组和三组全部无标签分区均已完整枚举；资源需求由半开区间峰值与达到峰值的着色证实。','',
+                  '## 7. Validator','15 个服务区各恰好分配一次；依赖、固定任务、资源着色及 Excel 回读违规为 0。库存缺口是分析指标，不是分区违规。'])
+    (OUT/'q4_summary.md').write_text('\n'.join(lines)+'\n',encoding='utf-8')
+    print('[10/10] 最终回读冻结',flush=True)
+    verify_q3_final_freeze()
+    if sha(OUT/'q4_fixed_task_snapshot.json')!=snapshot_hash:raise RuntimeError('固定快照发生变化')
+    print('==============================\nQ4 SOLVED\n==============================')
+    print(f'Q3_FINAL_FREEZE = PASS; components = {len(comps)}')
+    print(f'Q4_K2_VALID = TRUE; Q4_K3_VALID = TRUE; Q4_K2_EXACT = TRUE; Q4_K3_EXACT = TRUE')
+    print(f'K2 partitions = {k2["partitions_checked"]}; K3 partitions = {k3["partitions_checked"]}')
+    print(f'official_excel_roundtrip = {excel["official_excel_roundtrip"]}')
+    print(f'results = {OUT}')
+
+if __name__=='__main__':main()

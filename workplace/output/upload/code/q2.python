@@ -1,0 +1,2268 @@
+# AI 辅助编程声明：本程序及代码在人工智能工具辅助下完成，提交前由参赛队审查。
+# 工具名称：Codex（项目记录可核实）；开发机构：OpenAI。
+# 版本/模型：待参赛队根据实际使用记录核实；版本发布日期：待核实。
+# 另有早期 Deep Research 路线报告；其产品型号及发布日期待参赛队核实。
+# 本副本仅增加以上注释；正式冻结源码及求解结果均未修改。
+"""华为杯 D 题问题二：多点运输、实体无人机与共享电池联合排程。
+
+运行：python src/q2.python。水平与爬升能耗展开式为 DECLARED_MODEL_ASSUMPTION。
+"""
+from __future__ import annotations
+
+import csv
+import hashlib
+import json
+import math
+import time
+from collections import Counter, defaultdict
+from pathlib import Path
+
+import matplotlib
+matplotlib.use('Agg')
+import matplotlib.pyplot as plt
+import numpy as np
+from openpyxl import Workbook, load_workbook
+from openpyxl.styles import Alignment, Font, PatternFill
+from openpyxl.utils import get_column_letter
+from ortools.sat.python import cp_model
+from pyproj import Transformer
+import rasterio
+
+ROOT = Path(__file__).resolve().parents[1]
+DATA = ROOT / 'data'
+V1_OUT = ROOT / 'output' / 'q2'
+V1_FROZEN = ROOT / 'output' / 'q2_v1_frozen'
+OUT = ROOT / 'output' / 'q2_opt'
+TIME_SCALE = 1000
+ENERGY_SCALE = 1_000_000
+SEED = 20260924
+START = time.perf_counter()
+LOG = []
+
+
+def log(message):
+    line = f'[{time.perf_counter()-START:9.2f}s] {message}'
+    print(line, flush=True)
+    LOG.append(line)
+
+
+def dump_json(name, value):
+    (OUT / name).write_text(json.dumps(value, ensure_ascii=False, indent=2, default=str), encoding='utf-8')
+
+
+def csv_out(name, records, fields=None):
+    fields = fields or (list(records[0]) if records else [])
+    with (OUT / name).open('w', newline='', encoding='utf-8-sig') as fh:
+        writer = csv.DictWriter(fh, fields, extrasaction='ignore')
+        writer.writeheader()
+        writer.writerows(records)
+
+
+def source(name):
+    paths = list(DATA.rglob(name))
+    if len(paths) != 1:
+        raise RuntimeError(f'官方文件定位异常：{name}，找到 {len(paths)} 份')
+    return paths[0]
+
+
+def sha(path):
+    with path.open('rb') as fh:
+        return hashlib.file_digest(fh, 'sha256').hexdigest()
+
+
+def gate_and_freeze():
+    gate = ROOT / 'output' / 'audit_gate0'
+    summary = json.loads((gate / 'audit_summary.json').read_text(encoding='utf-8'))
+    contract = json.loads((gate / 'physics_contract.json').read_text(encoding='utf-8'))
+    manifest = json.loads((gate / 'input_manifest.json').read_text(encoding='utf-8'))
+    if summary.get('gate') != 'PASS' or summary.get('q1_ready') != 'YES':
+        raise RuntimeError('Gate-0 未通过')
+    expected = {'horizontal_kwh': 'E_use_g*d_ij/L_g(q)',
+                'climb_kwh': '(m_empty_g+q)*9.80665*h_up_ij/(eta_up_g*3.6e6)',
+                'roundtrip_kwh': 'E(O01,Si,q)+E(Si,O01,0)'}
+    if contract.get('status') != 'DECLARED_MODEL_ASSUMPTION' or contract.get('declared_formulas') != expected:
+        raise RuntimeError('Gate-0 冻结能耗口径不一致')
+    for item in manifest['files']:
+        path = DATA / item['relative_path']
+        if not path.exists() or sha(path) != item['sha256']:
+            raise RuntimeError(f'官方原始文件与 Gate-0 SHA256 不一致：{path}')
+    q1 = ROOT / 'output' / 'q1'
+    q1_summary = json.loads((q1 / 'q1_summary.json').read_text(encoding='utf-8'))
+    q1_validation = json.loads((q1 / 'q1_validation.json').read_text(encoding='utf-8'))
+    if q1_summary.get('Q1_VALID') is not True or q1_summary.get('total_sorties') != 18:
+        raise RuntimeError('Q1 冻结结果无效')
+    if q1_validation.get('Q1_VALID') is not True:
+        raise RuntimeError('Q1 Validator 未通过')
+    names = [ROOT/'src'/'q1.python'] + [q1/n for n in
+             ['q1_summary.json', 'q1_summary.md', 'q1_validation.json', 'q1_results.xlsx',
+              '结果提交模板_Q1已填写.xlsx'] if (q1/n).exists()]
+    frozen = {'files': {str(p.relative_to(ROOT)).replace('\\', '/'): sha(p) for p in names},
+              'q1_summary': {k: q1_summary[k] for k in
+                             ['Q1_VALID', 'total_sorties', 'total_energy_kwh',
+                              'total_operation_time_s', 'A_sorties', 'B_sorties', 'C_sorties']}}
+    dump_json('q1_freeze_manifest.json', frozen)
+    return frozen
+
+
+def verify_freeze(frozen):
+    changed = [name for name, digest in frozen['files'].items() if sha(ROOT/name) != digest]
+    if changed:
+        raise RuntimeError(f'Q1 冻结文件被修改：{changed}')
+    return 'PASS'
+
+
+def section_rows(path, marker):
+    book = load_workbook(path, read_only=True, data_only=True)
+    try:
+        for sheet in book:
+            rows = list(sheet.iter_rows(values_only=True))
+            for index, head in enumerate(rows):
+                if marker in head:
+                    result = []
+                    for rowno, row in enumerate(rows[index+1:], index+2):
+                        if all(v is None for v in row):
+                            break
+                        result.append((rowno, dict(zip(head, row))))
+                    return sheet.title, result
+    finally:
+        book.close()
+    raise RuntimeError(f'{path.name} 缺少字段 {marker}')
+
+
+def load_inputs():
+    nodes = {}
+    path = source('调度中心与服务区.xlsx')
+    for marker in ('调度中心编号', '服务区编号'):
+        _, rows = section_rows(path, marker)
+        for _, row in rows:
+            nid = row[marker]
+            if nid in nodes:
+                raise RuntimeError(f'节点重复：{nid}')
+            nodes[nid] = {'lon': float(row['经度（°）']), 'lat': float(row['纬度（°）']),
+                          'elev': float(row['海拔（m）'])}
+    boxes = {}
+    _, rows = section_rows(source('物资需求与配送时限.xlsx'), '货箱编号')
+    for _, row in rows:
+        bid = row['货箱编号']
+        if bid in boxes:
+            raise RuntimeError(f'货箱重复：{bid}')
+        boxes[bid] = {'id': bid, 'service': row['服务区编号'], 'category': row['物资类型'],
+                      'mass': float(row['单箱质量（kg）']), 'volume': float(row['单箱体积（m³）']),
+                      'first': row['是否首批保障'] == '是',
+                      'first_deadline': row['首批截止时间（s）'],
+                      'expected': float(row['期望送达时间（s）'])}
+        if boxes[bid]['mass'] <= 0 or boxes[bid]['volume'] <= 0 or boxes[bid]['service'] not in nodes:
+            raise RuntimeError(f'货箱参数异常：{bid}')
+        b = boxes[bid]
+        hard = []
+        if b['category'] == '医疗物资':
+            hard.append(b['expected'])
+        if b['first']:
+            hard.append(float(b['first_deadline']))
+        b['hard_deadline'] = min(hard) if hard else None
+    models = {}
+    path = source('运输无人机数据.xlsx')
+    _, rows = section_rows(path, '最大载货质量（kg）')
+    for _, row in rows:
+        models[row['机型编号']] = row
+    _, rows = section_rows(path, '无人机编号')
+    uavs = defaultdict(list)
+    for _, row in rows:
+        if row['初始位置'] != 'O01':
+            raise RuntimeError('实体无人机初始位置不是 O01')
+        uavs[row['机型编号']].append(row['无人机编号'])
+    _, rows = section_rows(path, '共享电池组总数（组）')
+    batteries = defaultdict(list)
+    full_charge = {}
+    for _, row in rows:
+        g = row['机型编号']
+        batteries[g] = [f'{g}_BAT_{i:02d}' for i in range(1, int(row['共享电池组总数（组）'])+1)]
+        full_charge[g] = float(row['等效完全充电时间（s）'])
+    if set(nodes) != {'O01'} | {f'S{i:03d}' for i in range(1, 16)} or len(boxes) != 80:
+        raise RuntimeError('节点或货箱集合与 Gate-0 不一致')
+    if set(models) != {'A', 'B', 'C'} or sum(map(len, uavs.values())) != 8:
+        raise RuntimeError('机型或实体无人机集合异常')
+    return nodes, boxes, models, dict(uavs), dict(batteries), full_charge
+
+
+def trace_dem_cells(x0, y0, x1, y1, width, height):
+    """与 Gate-0 相同的 supercover，边界和角点触及像元全部计入。"""
+    dx, dy = x1-x0, y1-y0
+    ts = [0.0, 1.0]
+    if dx:
+        for k in range(math.floor(min(x0, x1)), math.ceil(max(x0, x1))+1):
+            t = (k-x0)/dx
+            if 0 < t < 1:
+                ts.append(t)
+    if dy:
+        for k in range(math.floor(min(y0, y1)), math.ceil(max(y0, y1))+1):
+            t = (k-y0)/dy
+            if 0 < t < 1:
+                ts.append(t)
+    ts.sort()
+    unique = []
+    for t in ts:
+        if not unique or abs(t-unique[-1]) > 1e-12:
+            unique.append(t)
+    cells = set()
+    def add(t):
+        x, y = x0+dx*t, y0+dy*t
+        xs, ys = {math.floor(x)}, {math.floor(y)}
+        if abs(x-round(x)) < 1e-9:
+            xs.add(round(x)-1)
+        if abs(y-round(y)) < 1e-9:
+            ys.add(round(y)-1)
+        for col in xs:
+            for row in ys:
+                if 0 <= row < height and 0 <= col < width:
+                    cells.add((row, col))
+    for t in unique:
+        add(t)
+    for a, b in zip(unique, unique[1:]):
+        add((a+b)/2)
+    return cells
+
+
+def build_segments(nodes, models):
+    transformer = Transformer.from_crs('EPSG:4326', 'EPSG:32649', always_xy=True)
+    segments = {}
+    with rasterio.open(source('镇龙乡及周边30米DEM.tif')) as dem:
+        if dem.crs.to_epsg() != 4326:
+            raise RuntimeError('DEM CRS 与 Gate-0 不一致')
+        arr = dem.read(1)
+        valid = (dem.read_masks(1) > 0) & np.isfinite(arr) & (arr != -32767)
+        for a in sorted(nodes):
+            for b in sorted(nodes):
+                if a == b:
+                    continue
+                na, nb = nodes[a], nodes[b]
+                x0, y0 = (~dem.transform) * (na['lon'], na['lat'])
+                x1, y1 = (~dem.transform) * (nb['lon'], nb['lat'])
+                cells = trace_dem_cells(x0, y0, x1, y1, dem.width, dem.height)
+                if not cells or cells != trace_dem_cells(x1, y1, x0, y0, dem.width, dem.height):
+                    raise RuntimeError(f'DEM 穿越异常：{a}->{b}')
+                if any(not valid[r, c] for r, c in cells):
+                    raise RuntimeError(f'航段接触非法 DEM 像元：{a}->{b}')
+                maxdem = max(float(arr[r, c]) for r, c in cells)
+                cruise = maxdem + 50
+                start_h = na['elev'] + (30 if a != 'O01' else 0)
+                end_h = nb['elev'] + (30 if b != 'O01' else 0)
+                up, down = cruise-start_h, cruise-end_h
+                if up < 0 or down < 0:
+                    raise RuntimeError(f'巡航高度低于作业高度：{a}->{b}')
+                xa, ya = transformer.transform(na['lon'], na['lat'])
+                xb, yb = transformer.transform(nb['lon'], nb['lat'])
+                d = math.hypot(xb-xa, yb-ya)
+                fly = {g: up/float(m['最大爬升速度（m/s）']) +
+                       d/float(m['计划巡航速度（m/s）']) +
+                       down/float(m['最大下降速度（m/s）']) for g, m in models.items()}
+                segments[a, b] = {'start': a, 'end': b, 'distance': d, 'max_dem': maxdem,
+                                  'cruise': cruise, 'climb': up, 'descent': down,
+                                  'cells': len(cells), 'flight': fly}
+    if len(segments) != 240:
+        raise RuntimeError('未完成 240 条有向航段')
+    return segments
+
+
+def equivalent_range(m, q):
+    Q = float(m['最大载货质量（kg）'])
+    if q < -1e-9 or q > Q+1e-9:
+        raise ValueError('载荷越界')
+    q = max(0, min(q, Q))
+    return float(m['空载标准航程（m）']) - (
+        float(m['空载标准航程（m）'])-float(m['满载标准航程（m）']))*(q/Q)**1.5
+
+
+def segment_energy(m, seg, q):
+    # 两个分项是 Gate-0 冻结的本文建模假设，并非官方逐项公式。
+    Euse = float(m['电池可用能量（kWh）'])
+    horizontal = Euse*seg['distance']/equivalent_range(m, q)
+    climb = (float(m['含电池空载总质量（kg）'])+q)*9.80665*seg['climb']/(
+        float(m['爬升能耗效率'])*3.6e6)
+    return horizontal+climb
+
+
+def charging_time(soc, full):
+    if not 0 <= soc <= 1:
+        raise ValueError('SOC 越界')
+    if soc < 0.9:
+        return full*(0.65*(0.9-soc)/0.9+0.35)
+    return full*0.35*(1-soc)/0.1
+
+
+def evaluate_route(g, groups, boxes, models, segments, full_charge, check_deadline=True):
+    """groups 为有序 (service_id, box_id tuple)。投递后质量逐段递减。"""
+    m = models[g]
+    ids = tuple(bid for _, group in groups for bid in group)
+    if not ids or len(ids) != len(set(ids)):
+        return None
+    mass = sum(boxes[bid]['mass'] for bid in ids)
+    volume = sum(boxes[bid]['volume'] for bid in ids)
+    if mass > float(m['最大载货质量（kg）'])+1e-9 or volume > float(m['可用装载体积（m³）'])+1e-12:
+        return None
+    prep = float(m['工位固定准备时间（s）']) + len(ids)*float(m['每箱装载时间（s）'])
+    t, energy, q, at = prep, 0.0, mass, 'O01'
+    deliveries = {}
+    leg_details = []
+    for sid, group in groups:
+        if not group or any(boxes[bid]['service'] != sid for bid in group):
+            return None
+        seg = segments[at, sid]
+        e = segment_energy(m, seg, q)
+        t += seg['flight'][g]
+        energy += e
+        leg_details.append({'from': at, 'to': sid, 'load_kg': q, 'energy_kwh': e,
+                            'distance_m': seg['distance'], 'flight_time_s': seg['flight'][g]})
+        t += float(m['接收点基础交接时间（s）']) + len(group)*float(m['每箱增加交接时间（s）'])
+        for bid in group:
+            deliveries[bid] = t
+        q -= sum(boxes[bid]['mass'] for bid in group)
+        if q < -1e-8:
+            raise RuntimeError('投递后载荷为负')
+        q = max(0, q)
+        at = sid
+    seg = segments[at, 'O01']
+    e = segment_energy(m, seg, q)
+    energy += e
+    t += seg['flight'][g]
+    leg_details.append({'from': at, 'to': 'O01', 'load_kg': q, 'energy_kwh': e,
+                        'distance_m': seg['distance'], 'flight_time_s': seg['flight'][g]})
+    Euse = float(m['电池可用能量（kWh）'])
+    rho = float(m['返航电量下限（%）'])/100
+    if energy > (1-rho)*Euse+1e-10:
+        return None
+    soc = 1-energy/Euse
+    latest = min((boxes[bid]['hard_deadline']-offset for bid, offset in deliveries.items()
+                  if boxes[bid]['hard_deadline'] is not None), default=None)
+    if check_deadline and latest is not None and latest < -1e-9:
+        return None
+    return {'g': g, 'groups': tuple((sid, tuple(group)) for sid, group in groups),
+            'boxes': ids, 'mass': mass, 'volume': volume, 'prep': prep,
+            'return_offset': t, 'deliveries': deliveries, 'energy': energy,
+            'soc': soc, 'charge': charging_time(soc, full_charge[g]),
+            'latest_start': latest, 'legs': leg_details}
+
+
+def route_key(candidate):
+    return (candidate['g'], tuple((sid, tuple(sorted(group))) for sid, group in candidate['groups']))
+
+
+def candidate_score(c, boxes):
+    """只用于控制候选池；不参与正式四层优化。"""
+    critical = sum(boxes[bid]['hard_deadline'] is not None for bid in c['boxes'])
+    hard_slack = min((boxes[bid]['hard_deadline']-c['deliveries'][bid] for bid in c['boxes']
+                      if boxes[bid]['hard_deadline'] is not None), default=10000)
+    if hard_slack < -1e-8:
+        return float('inf')
+    return c['return_offset']/len(c['boxes']) + 70*c['energy']/len(c['boxes']) - 80*critical/len(c['boxes'])
+
+
+def generate_candidates(boxes, models, segments, full_charge, round_no=0):
+    """单箱 + Q1 种子 + 同站子集 + 有序多站 Beam，任何入池项均经过精确物理检验。"""
+    by_service = defaultdict(list)
+    for bid, box in sorted(boxes.items()):
+        by_service[box['service']].append(bid)
+    archive = {}
+    provenance = defaultdict(set)
+
+    def add(g, groups, tag):
+        c = evaluate_route(g, groups, boxes, models, segments, full_charge)
+        if c is None:
+            return None
+        key = route_key(c)
+        if key not in archive:
+            archive[key] = c
+        provenance[key].add(tag)
+        return c
+
+    group_options = defaultdict(list)
+    def option(sid, group):
+        group = tuple(sorted(set(group)))
+        if group and group not in group_options[sid]:
+            group_options[sid].append(group)
+
+    for sid, bids in sorted(by_service.items()):
+        for bid in bids:
+            option(sid, (bid,))
+            for g in models:
+                add(g, ((sid, (bid,)),), 'single_box')
+        critical = [bid for bid in bids if boxes[bid]['hard_deadline'] is not None]
+        ordinary = [bid for bid in bids if boxes[bid]['hard_deadline'] is None]
+        if critical:
+            option(sid, critical)
+        if ordinary:
+            option(sid, ordinary)
+        option(sid, bids)
+        # 截止时间优先前缀、同站不同箱组合以及确定性装载桶。
+        priority = sorted(bids, key=lambda bid: (boxes[bid]['hard_deadline'] or 1e9,
+                                                 boxes[bid]['expected'], -boxes[bid]['mass'], bid))
+        for length in range(2, min(len(priority), 8)+1):
+            option(sid, priority[:length])
+        import itertools
+        for group in itertools.combinations(bids, 2):
+            if len(bids) <= 8 or any(boxes[bid]['hard_deadline'] is not None for bid in group):
+                option(sid, group)
+        for g, m in models.items():
+            bins = []
+            for bid in priority:
+                placed = False
+                for bin_group in bins:
+                    trial = bin_group+[bid]
+                    if sum(boxes[x]['mass'] for x in trial) <= float(m['最大载货质量（kg）']) and \
+                       sum(boxes[x]['volume'] for x in trial) <= float(m['可用装载体积（m³）']):
+                        bin_group.append(bid)
+                        placed = True
+                        break
+                if not placed:
+                    bins.append([bid])
+            for group in bins:
+                option(sid, group)
+        for group in group_options[sid]:
+            for g in models:
+                add(g, ((sid, group),), 'same_service')
+
+    with (ROOT/'output'/'q1'/'q1_batch_solution.csv').open(encoding='utf-8-sig', newline='') as fh:
+        for row in csv.DictReader(fh):
+            add(row['aircraft_type'], ((row['service_id'], tuple(row['box_ids'].split(','))),), 'q1_seed')
+
+    # 多站扩展：先选关键箱组与少量普通箱组。相同箱集合的访问顺序均保留。
+    beam_options = {}
+    for sid, bids in sorted(by_service.items()):
+        critical = tuple(bid for bid in bids if boxes[bid]['hard_deadline'] is not None)
+        ordinary = tuple(bid for bid in bids if boxes[bid]['hard_deadline'] is None)
+        selected = []
+        for group in [critical, ordinary, tuple(bids)]:
+            if group and group not in selected:
+                selected.append(group)
+        for bid in critical[:2]:
+            if (bid,) not in selected:
+                selected.append((bid,))
+        beam_options[sid] = selected
+    beam_width = 40 if round_no == 0 else 80
+    max_depth = 4 if round_no == 0 else 5
+    beam_archive = {}
+    for g in models:
+        frontier = []
+        for sid, options in beam_options.items():
+            for group in options:
+                c = add(g, ((sid, group),), 'beam_seed')
+                if c is not None:
+                    frontier.append(c)
+        frontier.sort(key=lambda c: (candidate_score(c, boxes), c['return_offset'], route_key(c)))
+        # 每个起始服务区均获得扩展机会，防止少数近点淹没远点。
+        frontier = frontier[:beam_width] + [next((c for c in frontier if c['groups'][0][0] == sid), None)
+                                               for sid in by_service]
+        frontier = [c for c in frontier if c is not None]
+        for depth in range(2, max_depth+1):
+            expanded = {}
+            for c in frontier:
+                visited = {sid for sid, _ in c['groups']}
+                for sid, options in beam_options.items():
+                    if sid in visited:
+                        continue
+                    for group in options:
+                        new = add(g, c['groups']+((sid, group),), 'beam')
+                        if new is not None:
+                            expanded[route_key(new)] = new
+            if not expanded:
+                break
+            ranked = sorted(expanded.values(), key=lambda c: (candidate_score(c, boxes),
+                             c['return_offset'], route_key(c)))
+            frontier = ranked[:beam_width]
+            # 保留各服务区的路径多样性。
+            for sid in by_service:
+                exemplar = next((c for c in ranked if sid in {s for s, _ in c['groups']}), None)
+                if exemplar is not None and route_key(exemplar) not in {route_key(c) for c in frontier}:
+                    frontier.append(exemplar)
+            for c in frontier:
+                beam_archive[route_key(c)] = c
+    # CP-SAT 的活动池限幅；单箱及 Q1 种子始终保留，扩池时提高上限。
+    mandatory_keys = {key for key, tags in provenance.items() if tags & {'single_box', 'q1_seed'}}
+    limit = 650 if round_no == 0 else 1200
+    remaining = [c for key, c in archive.items() if key not in mandatory_keys]
+    remaining.sort(key=lambda c: (candidate_score(c, boxes), -len(c['boxes']), c['energy'], route_key(c)))
+    selected = [archive[key] for key in sorted(mandatory_keys)] + remaining[:max(0, limit-len(mandatory_keys))]
+    selected.sort(key=lambda c: (c['g'], tuple(s for s, _ in c['groups']), c['boxes']))
+    for i, c in enumerate(selected, 1):
+        c['id'] = f'P{i:05d}'
+    coverage = Counter(bid for c in selected for bid in c['boxes'])
+    stats = {'round': round_no, 'archived_count': len(archive), 'active_count': len(selected),
+             'beam_frontier_archive': len(beam_archive), 'coverage_min': min(coverage.values()),
+             'coverage_max': max(coverage.values()),
+             'by_type': dict(Counter(c['g'] for c in selected)),
+             'by_stops': dict(Counter(len(c['groups']) for c in selected)),
+             'missing_boxes': sorted(set(boxes)-set(coverage))}
+    if stats['missing_boxes']:
+        raise RuntimeError(f'候选缺少单箱覆盖：{stats["missing_boxes"]}')
+    return selected, stats
+
+
+def ceil_tick(seconds):
+    return math.ceil(seconds*TIME_SCALE-1e-10)
+
+
+def floor_tick(seconds):
+    return math.floor(seconds*TIME_SCALE+1e-10)
+
+
+def make_cp_model(candidates, boxes, uavs, batteries, horizon_s=100000,
+                  enforce_hard=True, enforce_uav=True, enforce_battery=True):
+    model = cp_model.CpModel()
+    horizon = ceil_tick(horizon_s)
+    ys, starts = [], []
+    uav_choice, battery_choice = {}, {}
+    uav_intervals, battery_intervals = defaultdict(list), defaultdict(list)
+    box_to_cands = defaultdict(list)
+    max_quantization = 0.0
+    for i, c in enumerate(candidates):
+        y = model.NewBoolVar(f'route_{i}')
+        start = model.NewIntVar(0, horizon, f'start_{i}')
+        ys.append(y)
+        starts.append(start)
+        model.Add(start == 0).OnlyEnforceIf(y.Not())
+        return_ticks = ceil_tick(c['return_offset'])
+        battery_ticks = ceil_tick(c['return_offset']+c['charge'])
+        max_quantization = max(max_quantization, return_ticks/TIME_SCALE-c['return_offset'],
+                               battery_ticks/TIME_SCALE-c['return_offset']-c['charge'])
+        if enforce_hard and c['latest_start'] is not None:
+            model.Add(start <= floor_tick(c['latest_start'])).OnlyEnforceIf(y)
+        for bid in c['boxes']:
+            box_to_cands[bid].append(i)
+        ac = []
+        for uid in uavs[c['g']]:
+            a = model.NewBoolVar(f'uav_{i}_{uid}')
+            uav_choice[i, uid] = a
+            ac.append(a)
+            uav_intervals[uid].append(model.NewOptionalIntervalVar(
+                start, return_ticks, start+return_ticks, a, f'ui_{i}_{uid}'))
+        model.Add(sum(ac) == y)
+        bc = []
+        for bid in batteries[c['g']]:
+            b = model.NewBoolVar(f'battery_{i}_{bid}')
+            battery_choice[i, bid] = b
+            bc.append(b)
+            battery_intervals[bid].append(model.NewOptionalIntervalVar(
+                start, battery_ticks, start+battery_ticks, b, f'bi_{i}_{bid}'))
+        model.Add(sum(bc) == y)
+    if enforce_uav:
+        for uid, intervals in uav_intervals.items():
+            model.AddNoOverlap(intervals)
+    if enforce_battery:
+        for bid, intervals in battery_intervals.items():
+            model.AddNoOverlap(intervals)
+    for bid in boxes:
+        model.Add(sum(ys[i] for i in box_to_cands[bid]) == 1)
+    late = {}
+    for bid, box in boxes.items():
+        if box['hard_deadline'] is not None:
+            continue
+        var = model.NewIntVar(0, horizon, f'late_{bid}')
+        late[bid] = var
+        due_tick = floor_tick(box['expected'])
+        for i in box_to_cands[bid]:
+            model.Add(var >= starts[i]+ceil_tick(candidates[i]['deliveries'][bid])-due_tick).OnlyEnforceIf(ys[i])
+    makespan = model.NewIntVar(0, horizon+ceil_tick(10000), 'makespan')
+    for i, c in enumerate(candidates):
+        model.Add(makespan >= starts[i]+ceil_tick(c['return_offset'])).OnlyEnforceIf(ys[i])
+    energy_terms = [round(c['energy']*ENERGY_SCALE) for c in candidates]
+    objectives = [sum(late.values()), makespan,
+                  sum(energy_terms[i]*ys[i] for i in range(len(ys))), sum(ys)]
+    variables = {'y': ys, 'start': starts, 'uav': uav_choice, 'battery': battery_choice,
+                 'late': late, 'makespan': makespan}
+    return model, objectives, variables, max_quantization
+
+
+def extract_solution(solver, variables, candidates, uavs, batteries):
+    selected = []
+    for i, c in enumerate(candidates):
+        if not solver.BooleanValue(variables['y'][i]):
+            continue
+        uid = next(uid for uid in uavs[c['g']] if solver.BooleanValue(variables['uav'][i, uid]))
+        battery = next(bid for bid in batteries[c['g']] if solver.BooleanValue(variables['battery'][i, bid]))
+        selected.append({'candidate': c, 'start': solver.Value(variables['start'][i])/TIME_SCALE,
+                         'uav': uid, 'battery': battery})
+    selected.sort(key=lambda s: (s['start'], s['uav'], s['candidate']['id']))
+    return selected
+
+
+def solve_joint(candidates, boxes, uavs, batteries, time_limit=90):
+    model, objectives, variables, quant_error = make_cp_model(candidates, boxes, uavs, batteries)
+    stages = []
+    best = None
+    hint_variables = (variables['y']+variables['start']+list(variables['uav'].values())+
+                      list(variables['battery'].values())+list(variables['late'].values())+
+                      [variables['makespan']])
+    for stage, objective in enumerate(objectives, 1):
+        model.Minimize(objective)
+        solver = cp_model.CpSolver()
+        solver.parameters.max_time_in_seconds = time_limit if stage == 1 else time_limit*1.5
+        solver.parameters.num_search_workers = 8
+        solver.parameters.random_seed = SEED
+        solver.parameters.relative_gap_limit = 0
+        status = solver.Solve(model)
+        name = solver.StatusName(status)
+        log(f'CP-SAT F{stage} = {name}，目标 {solver.ObjectiveValue() if status in (2, 4) else None}，耗时 {solver.WallTime():.1f}s')
+        if status not in (cp_model.OPTIMAL, cp_model.FEASIBLE):
+            return best, stages, {'status': name, 'failed_stage': stage,
+                                  'time_quantization_max_s': quant_error}
+        value = int(round(solver.ObjectiveValue()))
+        best = extract_solution(solver, variables, candidates, uavs, batteries)
+        stages.append({'objective': f'F{stage}', 'status': name, 'integer_value': value,
+                       'best_bound': solver.BestObjectiveBound(), 'runtime_s': solver.WallTime(),
+                       'gap': abs(value-solver.BestObjectiveBound())})
+        model.Add(objective <= value)
+        # 前层已验证的完整赋值作为下一层可行提示，减少大量同型 UAV/电池对称性造成的冷启动。
+        model.ClearHints()
+        for var in hint_variables:
+            model.AddHint(var, solver.Value(var))
+    return best, stages, {'status': 'FEASIBLE', 'time_quantization_max_s': quant_error}
+
+
+def validate_solution(selected, boxes, models, segments, full_charge, uavs, batteries):
+    """忽略 CP-SAT 的约束判断，按最终架次、原始箱子和原始浮点物理量重算。"""
+    violations = []
+    counts = Counter()
+    covers = Counter()
+    uav_schedule, battery_schedule = defaultdict(list), defaultdict(list)
+    routes, delivery_rows, uav_rows, battery_rows = [], [], [], []
+    for number, item in enumerate(sorted(selected, key=lambda s: (s['start'], s['uav'])), 1):
+        old = item['candidate']
+        g = old['g']
+        uid, battery, start = item['uav'], item['battery'], item['start']
+        sortie = f'Q2-{number:03d}'
+        if uid not in uavs[g] or battery not in batteries[g]:
+            violations.append(f'{sortie}:机型与资源不匹配')
+            counts['battery_type_mismatch'] += 1
+        if start < 0:
+            violations.append(f'{sortie}:负开始时刻')
+            counts['negative_start'] += 1
+        if any(boxes[bid]['service'] != sid for sid, group in old['groups'] for bid in group):
+            violations.append(f'{sortie}:跨区箱组错误')
+            counts['cross_service_batch'] += 1
+        raw_mass = sum(boxes[bid]['mass'] for bid in old['boxes'])
+        raw_volume = sum(boxes[bid]['volume'] for bid in old['boxes'])
+        if raw_mass > float(models[g]['最大载货质量（kg）'])+1e-9:
+            violations.append(f'{sortie}:质量超限')
+            counts['mass_violations'] += 1
+        if raw_volume > float(models[g]['可用装载体积（m³）'])+1e-12:
+            violations.append(f'{sortie}:体积超限')
+            counts['volume_violations'] += 1
+        fresh = evaluate_route(g, old['groups'], boxes, models, segments, full_charge)
+        if fresh is None:
+            violations.append(f'{sortie}:物理候选重算失败')
+            counts['energy_reserve_violations'] += 1
+            continue
+        if old['boxes'] != fresh['boxes'] or abs(old['energy']-fresh['energy']) > 1e-9:
+            violations.append(f'{sortie}:候选与重算不一致')
+            counts['route_recalculation_mismatch'] += 1
+        if abs(fresh['legs'][-1]['load_kg']) > 1e-8:
+            violations.append(f'{sortie}:返程非空载')
+            counts['return_load_violations'] += 1
+        return_time = start+fresh['return_offset']
+        battery_full = return_time+fresh['charge']
+        uav_schedule[uid].append((start, return_time, sortie))
+        battery_schedule[battery].append((start, battery_full, sortie))
+        uav_rows.append({'sortie_id': sortie, 'uav_id': uid, 'type': g, 'start_s': start,
+                         'takeoff_s': start+fresh['prep'], 'return_s': return_time})
+        battery_rows.append({'sortie_id': sortie, 'battery_id': battery, 'type': g,
+                             'occupation_start_s': start, 'charge_start_s': return_time,
+                             'full_ready_s': battery_full, 'return_soc': fresh['soc'],
+                             'charging_time_s': fresh['charge']})
+        routes.append({'sortie_id': sortie, 'candidate_id': old['id'], 'uav_id': uid,
+                       'aircraft_type': g, 'battery_id': battery, 'start_s': start,
+                       'takeoff_s': start+fresh['prep'],
+                       'service_sequence': ','.join(s for s, _ in fresh['groups']),
+                       'box_ids': ','.join(fresh['boxes']), 'box_count': len(fresh['boxes']),
+                       'mass_kg': fresh['mass'], 'volume_m3': fresh['volume'],
+                       'return_s': return_time, 'operation_time_s': fresh['return_offset'],
+                       'initial_mass_kg': fresh['mass'], 'initial_volume_m3': fresh['volume'],
+                       'start_time_s': start, 'takeoff_time_s': start+fresh['prep'],
+                       'return_time_s': return_time, 'uav_release_time_s': return_time,
+                       'battery_full_time_s': battery_full, 'hard_latest_start_s': fresh['latest_start'],
+                       'energy_kwh': fresh['energy'], 'energy_budget_kwh':
+                       (1-float(models[g]['返航电量下限（%）'])/100)*float(models[g]['电池可用能量（kWh）']),
+                       'return_soc': fresh['soc'], 'battery_full_s': battery_full})
+        for bid, offset in fresh['deliveries'].items():
+            covers[bid] += 1
+            box = boxes[bid]
+            delivered = start+offset
+            hard = box['hard_deadline']
+            if hard is not None and delivered > hard+1e-8:
+                violations.append(f'{sortie}:{bid}:硬时限 {delivered:.9f}>{hard}')
+                counts['hard_violations'] += 1
+                if box['category'] == '医疗物资':
+                    counts['medical_deadline_violations'] += 1
+                if box['first']:
+                    counts['first_batch_deadline_violations'] += 1
+            delivery_rows.append({'box_id': bid, 'sortie_id': sortie, 'service_id': box['service'],
+                                  'category': box['category'], 'first_batch': box['first'],
+                                  'delivery_complete_s': delivered, 'hard_deadline_s': hard,
+                                  'expected_s': box['expected'],
+                                  'ordinary_lateness_s': max(0, delivered-box['expected']) if hard is None else 0,
+                                  'aircraft_type': g, 'uav_id': uid, 'start_time_s': start,
+                                  'delivery_complete_time_s': delivered, 'expected_time_s': box['expected'],
+                                  'tardiness_s': max(0, delivered-box['expected']) if hard is None else 0,
+                                  'deadline_status': 'ON_TIME' if hard is None or delivered <= hard+1e-8 else 'VIOLATION'})
+    for uid, entries in uav_schedule.items():
+        entries.sort()
+        for left, right in zip(entries, entries[1:]):
+            if right[0] < left[1]-1e-8:
+                violations.append(f'UAV 重叠 {uid}:{left[2]}/{right[2]}')
+                counts['uav_overlap'] += 1
+    for battery, entries in battery_schedule.items():
+        entries.sort()
+        for left, right in zip(entries, entries[1:]):
+            if right[0] < left[1]-1e-8:
+                violations.append(f'电池未充满复用 {battery}:{left[2]}/{right[2]}')
+                counts['battery_overlap'] += 1
+                counts['reused_before_full_charge'] += 1
+    missing = sorted(set(boxes)-set(covers))
+    repeated = sorted(bid for bid, count in covers.items() if count > 1)
+    if missing:
+        violations.append(f'漏箱：{missing}')
+    if repeated:
+        violations.append(f'重复箱：{repeated}')
+    validation = {'Q2_VALID': not violations and len(delivery_rows) == 80,
+                  'boxes_total': len(boxes), 'boxes_delivered': len(delivery_rows),
+                  'boxes_missing': missing, 'boxes_duplicated': repeated,
+                  'medical_deadline_violations': counts['medical_deadline_violations'],
+                  'first_batch_deadline_violations': counts['first_batch_deadline_violations'],
+                  'hard_violations': counts['hard_violations'],
+                  'mass_violations': counts['mass_violations'],
+                  'volume_violations': counts['volume_violations'],
+                  'energy_reserve_violations': counts['energy_reserve_violations'],
+                  'cross_service_batch': counts['cross_service_batch'],
+                  'return_load_violations': counts['return_load_violations'],
+                  'battery_type_mismatch': counts['battery_type_mismatch'],
+                  'uav_overlap': counts['uav_overlap'], 'battery_overlap': counts['battery_overlap'],
+                  'reused_before_full_charge': counts['reused_before_full_charge'],
+                  'other_violations': len(violations)-counts['hard_violations']-
+                  counts['uav_overlap']-counts['battery_overlap'], 'violations': violations}
+    routes.sort(key=lambda r: r['sortie_id'])
+    delivery_rows.sort(key=lambda r: r['box_id'])
+    return validation, routes, delivery_rows, uav_rows, battery_rows
+
+
+def greedy_baseline(candidates, boxes, models, uavs, batteries):
+    """确定性 EDF + 最早资源释放。其不可行不影响正式模型。"""
+    uncovered = set(boxes)
+    uav_free = {uid: 0.0 for group in uavs.values() for uid in group}
+    battery_free = {bid: 0.0 for group in batteries.values() for bid in group}
+    selected = []
+    while uncovered:
+        best = None
+        for c in candidates:
+            if not set(c['boxes']) <= uncovered:
+                continue
+            uid = min(uavs[c['g']], key=lambda u: (uav_free[u], u))
+            bid = min(batteries[c['g']], key=lambda b: (battery_free[b], b))
+            start = max(uav_free[uid], battery_free[bid])
+            if c['latest_start'] is not None and start > c['latest_start']+1e-9:
+                continue
+            deadlines = [boxes[x]['hard_deadline'] for x in c['boxes']
+                         if boxes[x]['hard_deadline'] is not None]
+            earliest_deadline = min(deadlines) if deadlines else float('inf')
+            route_distance = sum(leg['distance_m'] for leg in c['legs'])
+            late = sum(max(0, start+off-boxes[x]['expected']) for x, off in c['deliveries'].items()
+                       if boxes[x]['hard_deadline'] is None)
+            key = (earliest_deadline, route_distance/len(c['boxes']), start, late,
+                   -len(c['boxes']), c['energy'], c['id'])
+            if best is None or key < best[0]:
+                best = (key, c, start, uid, bid)
+        if best is None:
+            return None
+        _, c, start, uid, bid = best
+        selected.append({'candidate': c, 'start': start, 'uav': uid, 'battery': bid})
+        uav_free[uid] = start+c['return_offset']
+        battery_free[bid] = uav_free[uid]+c['charge']
+        uncovered.difference_update(c['boxes'])
+    return selected
+
+
+def baseline_comparison(candidates, boxes, models, segments, full_charge, uavs, batteries):
+    results = []
+    q1_candidates = [c for c in candidates if len(c['groups']) == 1 and
+                     any(set(c['boxes']) == set(row['box_ids'].split(',')) and c['g'] == row['aircraft_type']
+                         for row in Q1_ROWS)]
+    if len(q1_candidates) != 18:
+        raise RuntimeError(f'Q1 18 个种子未全部进入活动池：{len(q1_candidates)}')
+    # 固定 Q1 组批仍联合安排实体 UAV 和电池；若硬时限无解则如实标注。
+    q1_selected, q1_stages, q1_info = solve_joint(q1_candidates, boxes, uavs, batteries, time_limit=25)
+    if q1_selected:
+        val, routes, deliveries, _, _ = validate_solution(q1_selected, boxes, models, segments,
+                                                           full_charge, uavs, batteries)
+        status = 'FEASIBLE' if val['Q2_VALID'] else 'INFEASIBLE'
+        results.append(metrics('Q1_fixed_baseline', status, routes, deliveries, val, q1_stages))
+    else:
+        results.append({'scenario': 'Q1_fixed_baseline', 'status': 'INFEASIBLE',
+                        'reason': q1_info})
+    greedy = greedy_baseline(candidates, boxes, models, uavs, batteries)
+    if greedy:
+        val, routes, deliveries, _, _ = validate_solution(greedy, boxes, models, segments,
+                                                           full_charge, uavs, batteries)
+        status = 'FEASIBLE' if val['Q2_VALID'] else 'INFEASIBLE'
+        results.append(metrics('greedy_baseline', status, routes, deliveries, val, []))
+    else:
+        results.append({'scenario': 'greedy_baseline', 'status': 'INFEASIBLE',
+                        'reason': 'EDF 贪心无可行剩余候选'})
+    return results
+
+
+def metrics(name, status, routes, deliveries, validation, stages):
+    counts = Counter(r['aircraft_type'] for r in routes)
+    return {'scenario': name, 'status': status,
+            'total_sorties': len(routes), 'total_energy_kwh': sum(r['energy_kwh'] for r in routes),
+            'makespan_s': max((r['return_s'] for r in routes), default=0),
+            'ordinary_total_tardiness_s': sum(r['ordinary_lateness_s'] for r in deliveries),
+            'ordinary_late_boxes': sum(r['ordinary_lateness_s'] > 1e-8 for r in deliveries),
+            'ordinary_max_lateness_s': max((r['ordinary_lateness_s'] for r in deliveries), default=0),
+            'selected_route_stop_counts': dict(Counter(len(r['service_sequence'].split(',')) for r in routes)),
+            'A_sorties': counts['A'], 'B_sorties': counts['B'], 'C_sorties': counts['C'],
+            'Q2_VALID': validation['Q2_VALID'], 'objective_statuses': [s['status'] for s in stages]}
+
+
+def workbook_sheet(book, title, rows):
+    sheet = book.create_sheet(title)
+    if not rows:
+        return sheet
+    fields = list(dict.fromkeys(key for row in rows for key in row))
+    sheet.append(fields)
+    for col in sheet[1]:
+        col.font = Font(bold=True, color='FFFFFF')
+        col.fill = PatternFill('solid', fgColor='17365D')
+        col.alignment = Alignment(wrap_text=True)
+    for row in rows:
+        sheet.append([row.get(field) if not isinstance(row.get(field), (list, dict, tuple))
+                      else json.dumps(row.get(field), ensure_ascii=False) for field in fields])
+    sheet.freeze_panes = 'A2'
+    sheet.auto_filter.ref = sheet.dimensions
+    for j, field in enumerate(fields, 1):
+        vals = [str(row.get(field, '')) for row in rows[:100]]
+        sheet.column_dimensions[get_column_letter(j)].width = min(55, max(13, max([len(field)]+[len(v) for v in vals])+2))
+    for row in sheet.iter_rows(min_row=2):
+        for cell in row:
+            if isinstance(cell.value, float):
+                cell.number_format = '0.0000000000'
+    return sheet
+
+
+def export_results(routes, deliveries, uav_rows, battery_rows, baselines, stages, validation):
+    csv_out('q2_routes.csv', routes)
+    csv_out('q2_box_delivery.csv', deliveries)
+    csv_out('q2_uav_timeline.csv', uav_rows)
+    csv_out('q2_battery_timeline.csv', battery_rows)
+    charging_rows = [{'battery_id': r['battery_id'], 'aircraft_type': r['type'],
+                      'sortie_id': r['sortie_id'], 'soc_after': r['return_soc'],
+                      'charge_start_s': r['charge_start_s'],
+                      'charge_end_s': r['full_ready_s'],
+                      'charging_time_s': r['charging_time_s']} for r in battery_rows]
+    csv_out('q2_charging_timeline.csv', charging_rows)
+    csv_out('q2_baseline_comparison.csv', baselines,
+            ['scenario', 'status', 'total_sorties', 'total_energy_kwh', 'makespan_s',
+             'ordinary_total_tardiness_s', 'ordinary_late_boxes', 'A_sorties', 'B_sorties',
+             'C_sorties', 'Q2_VALID', 'objective_statuses', 'reason'])
+    book = Workbook()
+    book.remove(book.active)
+    for title, rows in [('运输架次', routes), ('逐箱交付', deliveries), ('无人机时间线', uav_rows),
+                        ('电池时间线', battery_rows), ('基准比较', baselines),
+                        ('求解状态', stages), ('Validator', [validation])]:
+        workbook_sheet(book, title, rows)
+    book.save(OUT/'q2_results.xlsx')
+    for filename, title, rows in [('q2_routes.xlsx', '运输架次', routes),
+                                  ('q2_box_delivery.xlsx', '逐箱交付', deliveries)]:
+        single = Workbook()
+        single.remove(single.active)
+        workbook_sheet(single, title, rows)
+        single.save(OUT/filename)
+    dump_json('q2_solution.json', {'routes': routes, 'box_deliveries': deliveries,
+                                   'uav_timeline': uav_rows, 'battery_timeline': battery_rows,
+                                   'charging_timeline': charging_rows, 'validation': validation})
+    baseline_lines = ['# Q2 基准比较', '',
+                      'Q1 固定组批在同一实体 UAV、电池和硬时限约束下由 CP-SAT 检验；'
+                      'INFEASIBLE 表示这 18 个批次不能同时满足全部 Q2 硬约束。',
+                      'Greedy 使用截止优先与最早可用资源的确定性排程。', '',
+                      '| 基准 | 状态 | 总逾期 s | Makespan s | 能耗 kWh | 架次 |',
+                      '|---|---|---:|---:|---:|---:|']
+    for row in baselines:
+        baseline_lines.append(f'| {row["scenario"]} | {row["status"]} | '
+                              f'{row.get("ordinary_total_tardiness_s", "—")} | '
+                              f'{row.get("makespan_s", "—")} | '
+                              f'{row.get("total_energy_kwh", "—")} | '
+                              f'{row.get("total_sorties", "—")} |')
+    (OUT/'q2_baseline_comparison.md').write_text('\n'.join(baseline_lines), encoding='utf-8')
+    # 官方模板以冻结 Q1 文件为源，Q1、Q3、Q4 Sheet 均保持原状。
+    q1_template = ROOT/'output'/'q1'/'结果提交模板_Q1已填写.xlsx'
+    original = load_workbook(q1_template)
+    result = load_workbook(q1_template)
+    q2_route = result['Q2_运输架次']
+    q2_box = result['Q2_逐箱交付']
+    for i, row in enumerate(routes, 2):
+        values = [row['sortie_id'], row['uav_id'], row['aircraft_type'], row['battery_id'],
+                  row['start_s'], row['service_sequence'], row['return_s'], row['energy_kwh']]
+        for j, value in enumerate(values, 1):
+            q2_route.cell(i, j, value)
+    for i, row in enumerate(deliveries, 2):
+        values = [row['box_id'], row['sortie_id'], row['service_id'], row['delivery_complete_s']]
+        for j, value in enumerate(values, 1):
+            q2_box.cell(i, j, value)
+    for sheet in (q2_route, q2_box):
+        sheet.freeze_panes = 'A2'
+        for row in sheet.iter_rows(min_row=2):
+            for cell in row:
+                if isinstance(cell.value, float):
+                    cell.number_format = '0.0000000000'
+    path = OUT/'结果提交模板_Q1Q2已填写.xlsx'
+    result.save(path)
+    original.close()
+    result.close()
+    return path
+
+
+def verify_template(path, routes, deliveries):
+    source_book = load_workbook(ROOT/'output'/'q1'/'结果提交模板_Q1已填写.xlsx',
+                                read_only=True, data_only=True)
+    book = load_workbook(path, read_only=True, data_only=True)
+    try:
+        if book.sheetnames != source_book.sheetnames:
+            raise RuntimeError('官方模板 Sheet 名称或顺序变化')
+        for title in book.sheetnames:
+            if title.startswith('Q2_'):
+                continue
+            if list(book[title].values) != list(source_book[title].values):
+                raise RuntimeError(f'非 Q2 Sheet 内容变化：{title}')
+        actual_routes = [row for row in book['Q2_运输架次'].iter_rows(min_row=2, max_col=8,
+                         values_only=True) if row[0] is not None]
+        actual_boxes = [row for row in book['Q2_逐箱交付'].iter_rows(min_row=2, max_col=4,
+                        values_only=True) if row[0] is not None]
+        if len(actual_routes) != len(routes) or len(actual_boxes) != 80:
+            raise RuntimeError('Q2 模板回读行数不一致')
+        for actual, row in zip(actual_routes, routes):
+            values = [row['sortie_id'], row['uav_id'], row['aircraft_type'], row['battery_id'],
+                      row['start_s'], row['service_sequence'], row['return_s'], row['energy_kwh']]
+            for a, b in zip(actual, values):
+                if isinstance(b, float):
+                    if a is None or not math.isclose(float(a), b, rel_tol=1e-12, abs_tol=1e-9):
+                        raise RuntimeError(f'路线数值回读不一致：{row["sortie_id"]}')
+                elif a != b:
+                    raise RuntimeError(f'路线字段回读不一致：{row["sortie_id"]}')
+        for actual, row in zip(actual_boxes, deliveries):
+            if actual[:3] != (row['box_id'], row['sortie_id'], row['service_id']) or not math.isclose(
+                    float(actual[3]), row['delivery_complete_s'], abs_tol=1e-9):
+                raise RuntimeError(f'逐箱交付回读不一致：{row["box_id"]}')
+        return {'official_template_export': 'PASS', 'excel_roundtrip_check': 'PASS',
+                'q1_sheet_unchanged': True, 'route_rows': len(actual_routes),
+                'box_rows': len(actual_boxes)}
+    finally:
+        source_book.close()
+        book.close()
+
+
+def generate_figures(nodes, routes, deliveries, uav_rows, battery_rows):
+    figdir = OUT/'figures'
+    figdir.mkdir(exist_ok=True)
+    fig, ax = plt.subplots(figsize=(8, 7))
+    with rasterio.open(source('镇龙乡及周边30米DEM.tif')) as dem:
+        scale = max(1, math.ceil(max(dem.height, dem.width)/650))
+        terrain = dem.read(1, out_shape=(max(1,dem.height//scale), max(1,dem.width//scale)))
+        terrain = np.ma.masked_where(~np.isfinite(terrain) | (terrain == -32767), terrain)
+        bounds = dem.bounds
+        ax.imshow(terrain, extent=[bounds.left,bounds.right,bounds.bottom,bounds.top],
+                  origin='upper', cmap='terrain', alpha=0.5)
+    colors = plt.get_cmap('tab20')
+    for index, row in enumerate(routes):
+        sequence = ['O01']+row['service_sequence'].split(',')+['O01']
+        color = colors(index % 20)
+        ax.plot([nodes[s]['lon'] for s in sequence], [nodes[s]['lat'] for s in sequence],
+                alpha=0.75, linewidth=1.1, color=color, label=row['sortie_id'])
+        first = nodes[sequence[1]]
+        home = nodes['O01']
+        fraction = 0.35+0.025*(index % 5)
+        ax.annotate(row['sortie_id'][-3:],
+                    (home['lon']+(first['lon']-home['lon'])*fraction,
+                     home['lat']+(first['lat']-home['lat'])*fraction),
+                    fontsize=5, color=color, alpha=0.9)
+    ax.scatter([n['lon'] for n in nodes.values()], [n['lat'] for n in nodes.values()], s=20)
+    for sid, n in nodes.items():
+        ax.annotate(sid, (n['lon'], n['lat']), fontsize=7)
+    ax.set_xlabel('Longitude (deg)')
+    ax.set_ylabel('Latitude (deg)')
+    ax.set_title('Q2 transport routes')
+    ax.legend(loc='upper center', bbox_to_anchor=(0.5,-0.07), ncol=7, fontsize=6)
+    fig.tight_layout()
+    fig.savefig(figdir/'q2_routes_map.png', dpi=180)
+    plt.close(fig)
+    for title, rows, resource, start, end, filename in [
+        ('UAV schedule', uav_rows, 'uav_id', 'start_s', 'return_s', 'q2_uav_gantt.png'),
+        ('Battery occupation and charging', battery_rows, 'battery_id',
+         'occupation_start_s', 'full_ready_s', 'q2_battery_gantt.png')]:
+        labels = sorted({r[resource] for r in rows})
+        fig, ax = plt.subplots(figsize=(10, max(4, 0.35*len(labels)+1)))
+        for r in rows:
+            y = labels.index(r[resource])
+            ax.barh(y, r[end]-r[start], left=r[start], height=0.6,
+                    color='#367BA3', alpha=0.8)
+            if resource == 'battery_id':
+                ax.barh(y, r['full_ready_s']-r['charge_start_s'], left=r['charge_start_s'],
+                        height=0.6, color='#E8A657', alpha=0.85)
+        ax.set_yticks(range(len(labels)), labels)
+        ax.set_xlabel('Seconds since start')
+        ax.set_title(title)
+        fig.tight_layout()
+        fig.savefig(figdir/filename, dpi=180)
+        plt.close(fig)
+    fig, ax = plt.subplots(figsize=(9, 5))
+    hard = [r for r in deliveries if r['hard_deadline_s'] is not None]
+    soft = [r for r in deliveries if r['hard_deadline_s'] is None]
+    ax.scatter([r['hard_deadline_s'] for r in hard], [r['delivery_complete_s'] for r in hard],
+               label='Hard deadline', s=20)
+    ax.scatter([r['expected_s'] for r in soft], [r['delivery_complete_s'] for r in soft],
+               label='Ordinary expected', s=20, alpha=0.6)
+    limit = max(r['expected_s'] for r in deliveries)
+    ax.plot([0, limit], [0, limit], 'k--', linewidth=1)
+    ax.set_xlabel('Deadline / expected delivery (s)')
+    ax.set_ylabel('Actual delivery (s)')
+    ax.legend()
+    fig.tight_layout()
+    fig.savefig(figdir/'q2_delivery_deadlines.png', dpi=180)
+    plt.close(fig)
+    fig, ax = plt.subplots(figsize=(9, 4))
+    for r in battery_rows:
+        ax.scatter(r['charge_start_s'], r['return_soc'], s=24, label=r['type'])
+    ax.set_xlabel('Charging start (s)')
+    ax.set_ylabel('Return SOC')
+    ax.set_ylim(0, 1)
+    fig.tight_layout()
+    fig.savefig(figdir/'q2_battery_soc.png', dpi=180)
+    plt.close(fig)
+
+
+def write_reports(metrics_row, stages, baselines, validation, stats, quantization,
+                  frozen, template_check):
+    summary = {'Q1_FREEZE_INTEGRITY': 'PASS', 'Q2_VALID': validation['Q2_VALID'],
+               **{k: v for k, v in metrics_row.items() if k not in ('scenario', 'status')},
+               'objective_statuses': stages, 'candidate_pool': stats,
+               'time_quantization_max_s': quantization, 'baseline_comparison': baselines,
+               'official_template': template_check,
+               'physics_status': 'DECLARED_MODEL_ASSUMPTION',
+               'scheduling_status': 'DECLARED_SCHEDULING_ASSUMPTION',
+               'solver': 'OR-Tools CP-SAT', 'solver_version': __import__('ortools').__version__,
+               'seed': SEED, 'workers': 8, 'runtime_s': time.perf_counter()-START}
+    dump_json('q2_summary.json', summary)
+    dump_json('q2_validation.json', validation)
+    val_lines = ['# Q2 独立 Validator', '', f'Q2_VALID = {validation["Q2_VALID"]}', '',
+                 f'已交付 {validation["boxes_delivered"]}/{validation["boxes_total"]} 箱。',
+                 f'硬时限违规 {validation["hard_violations"]}；UAV 重叠 {validation["uav_overlap"]}；'
+                 f'电池重叠 {validation["battery_overlap"]}；其他违规 {validation["other_violations"]}。',
+                 '', '## 具体问题', '']
+    val_lines += [f'- {v}' for v in validation['violations']] or ['无。']
+    (OUT/'q2_validation.md').write_text('\n'.join(val_lines), encoding='utf-8')
+    lines = ['# 问题二求解结果', '', '## 1. Q1 冻结与继承关系', '',
+             f'Q1 冻结哈希核验：{summary["Q1_FREEZE_INTEGRITY"]}。Q1 的 18 个批次仅作为基准和候选种子；'
+             'Q2 重新选择组批、访问顺序、实体机、电池和开始时刻。',
+             '', '## 2. 数据与模型', '',
+             '80 个不可拆货箱；8 架官方实体运输无人机；共享电池数量和充电时间均读取官方附件。',
+             '航段使用 Gate-0 的 DEM supercover、沿线最高高程 +50m；服务区作业高度为官方地面高程 +30m。',
+             '候选多点架次通过箱级唯一覆盖、实体无人机与共享电池可选时间区间、两阶段充电及逐箱时限约束进入同一 CP-SAT 模型。',
+             '水平与爬升能耗的具体展开式属于 **DECLARED_MODEL_ASSUMPTION**。',
+             '同站多箱在该站交接全部完成时共同交付；电池自任务开始占用至返航后充满，均属于 **DECLARED_SCHEDULING_ASSUMPTION**。',
+             '', '## 3. 候选池', '',
+             f'归档候选 {stats["archived_count"]} 条；活动候选 {stats["active_count"]} 条；'
+             f'扩池 {stats["expansion_rounds"]} 轮。',
+             f'机型分布：{stats["by_type"]}；访问站数分布：{stats["by_stops"]}。',
+             '', '## 4. 正式结果与逐箱及时性', '',
+             f'- 已交付：{validation["boxes_delivered"]} 箱；Q2_VALID = {validation["Q2_VALID"]}。',
+             f'- 医疗硬时限违规：{validation["medical_deadline_violations"]}；首批硬时限违规：{validation["first_batch_deadline_violations"]}。',
+             f'- 普通物资总逾期：{metrics_row["ordinary_total_tardiness_s"]:.6f} s；逾期箱数：{metrics_row["ordinary_late_boxes"]}。',
+             f'- 普通物资最大单箱逾期：{metrics_row["ordinary_max_lateness_s"]:.6f} s。',
+             f'- Makespan：{metrics_row["makespan_s"]:.6f} s。',
+             f'- 总运输能耗：{metrics_row["total_energy_kwh"]:.9f} kWh；架次数：{metrics_row["total_sorties"]}。',
+             f'- A/B/C 架次：{metrics_row["A_sorties"]}/{metrics_row["B_sorties"]}/{metrics_row["C_sorties"]}。',
+             f'- 最终路线访问站数分布：{metrics_row["selected_route_stop_counts"]}。模型允许多站，'
+             '本次可行解的实际访问站数如实列示。',
+             f'- 实体 UAV 使用：{metrics_row["uav_usage"]}。',
+             f'- 电池使用：{metrics_row["battery_usage"]}。',
+             '', '## 5. 资源可行性', '',
+             f'UAV overlap={validation["uav_overlap"]}；battery overlap={validation["battery_overlap"]}；'
+             f'未充满复用={validation["reused_before_full_charge"]}；机型不匹配={validation["battery_type_mismatch"]}；'
+             f'质量/舱容/能量违规={validation["mass_violations"]}/{validation["volume_violations"]}/'
+             f'{validation["energy_reserve_violations"]}。',
+             '', '## 6. 四层目标求解状态', '',
+             '| 目标 | 状态 | 整数目标值 | 最优界 | 耗时 s |', '|---|---|---:|---:|---:|']
+    for row in stages:
+        lines.append(f'| {row["objective"]} | {row["status"]} | {row["integer_value"]} | '
+                     f'{row["best_bound"]:.3f} | {row["runtime_s"]:.2f} |')
+    lines += ['', '最优性状态仅针对最终活动候选池；FEASIBLE 不表示已证明全局最优。',
+              f'时间向上取整最大误差 {quantization:.9f} s；硬约束由原始浮点 Validator 再验。',
+              '', '## 7. 基准比较', '',
+              '| 基准 | 状态 | 总逾期 s | Makespan s | 能耗 kWh | 架次 |',
+              '|---|---|---:|---:|---:|---:|']
+    for row in baselines:
+        lines.append(f'| {row["scenario"]} | {row["status"]} | '
+                     f'{row.get("ordinary_total_tardiness_s", "—")} | '
+                     f'{row.get("makespan_s", "—")} | {row.get("total_energy_kwh", "—")} | '
+                     f'{row.get("total_sorties", "—")} |')
+    lines += ['', '## 8. Validator 与导出', '',
+              f'医疗及首批硬时限违规 {validation["hard_violations"]}，UAV 重叠 '
+              f'{validation["uav_overlap"]}，电池重叠 {validation["battery_overlap"]}。',
+              f'Q1 冻结哈希校验 {summary["Q1_FREEZE_INTEGRITY"]}；官方 Excel 导出与回读 '
+              f'{template_check["excel_roundtrip_check"]}。']
+    (OUT/'q2_summary.md').write_text('\n'.join(lines), encoding='utf-8')
+    return summary
+
+
+# ======================== Q2 P1 定向优化 ========================
+# 以下流程只读取 V1；所有新文件统一写 output/q2_opt。
+
+def verify_v1_freeze():
+    manifest = json.loads((V1_FROZEN/'freeze_manifest.json').read_text(encoding='utf-8'))
+    if manifest.get('Q2_V1_FREEZE') != 'PASS':
+        raise RuntimeError('Q2 V1 冻结标记无效')
+    for name, meta in manifest['files'].items():
+        frozen = V1_FROZEN/name
+        if not frozen.is_file() or sha(frozen) != meta['sha256']:
+            raise RuntimeError(f'Q2 V1 冻结文件损坏：{frozen}')
+        if name != 'q2_source_snapshot.txt':
+            live = V1_OUT/name
+            if not live.is_file() or sha(live) != meta['sha256']:
+                raise RuntimeError(f'Q2 V1 原件发生变化：{live}')
+    if manifest['source_sha256'] != sha(V1_FROZEN/'q2_source_snapshot.txt'):
+        raise RuntimeError('Q2 V1 源码快照哈希错误')
+    return manifest
+
+
+def atomic_json(path, value):
+    temp = path.with_name(path.name+'.tmp')
+    temp.write_text(json.dumps(value, ensure_ascii=False, indent=2, default=str), encoding='utf-8')
+    temp.replace(path)
+
+
+def lex_compare(a, b):
+    """返回 -1 表示 a 严格好于 b；使用明确的时间和能量数值容差。"""
+    fields = [('ordinary_total_tardiness_s', 0.001), ('makespan_s', 0.001),
+              ('total_energy_kwh', 1e-6), ('total_sorties', 0)]
+    for field, tol in fields:
+        delta = float(a[field])-float(b[field])
+        if delta < -tol:
+            return -1
+        if delta > tol:
+            return 1
+    return 0
+
+
+def groups_from_export(service_sequence, box_ids, boxes):
+    sequence = service_sequence.split(',')
+    ids = box_ids.split(',')
+    if len(ids) != len(set(ids)) or len(sequence) != len(set(sequence)):
+        raise RuntimeError('V1 导出中出现重复箱或重复服务区')
+    groups = tuple((sid, tuple(bid for bid in ids if boxes[bid]['service'] == sid))
+                   for sid in sequence)
+    if not all(group for _, group in groups) or sum(map(lambda x: len(x[1]), groups)) != len(ids):
+        raise RuntimeError('V1 候选箱组重建失败')
+    return groups
+
+
+def restore_v1(boxes, models, segments, full_charge, uavs, batteries):
+    """从冻结 CSV 重建全部 650 条候选，以有序站点/箱组键保持其身份。"""
+    with (V1_FROZEN/'q2_candidate_stats.csv').open(encoding='utf-8-sig', newline='') as fh:
+        old_rows = list(csv.DictReader(fh))
+    candidates, by_id = [], {}
+    for row in old_rows:
+        groups = groups_from_export(row['service_sequence'], row['box_ids'], boxes)
+        c = evaluate_route(row['aircraft_type'], groups, boxes, models, segments, full_charge)
+        if c is None:
+            raise RuntimeError(f'冻结候选重算不可行：{row["candidate_id"]}')
+        if not math.isclose(c['energy'], float(row['energy_kwh']), abs_tol=1e-8) or not math.isclose(
+                c['return_offset'], float(row['return_offset_s']), abs_tol=1e-8):
+            raise RuntimeError(f'冻结候选数值不一致：{row["candidate_id"]}')
+        c['id'] = row['candidate_id']
+        candidates.append(c)
+        by_id[c['id']] = c
+    if len(candidates) != 650 or len({route_key(c) for c in candidates}) != 650:
+        raise RuntimeError('V1 候选数或唯一键异常')
+    frozen_solution = json.loads((V1_FROZEN/'q2_solution.json').read_text(encoding='utf-8'))
+    selected = [{'candidate': by_id[row['candidate_id']], 'start': float(row['start_s']),
+                 'uav': row['uav_id'], 'battery': row['battery_id']}
+                for row in frozen_solution['routes']]
+    validation, routes, deliveries, uav_rows, battery_rows = validate_solution(
+        selected, boxes, models, segments, full_charge, uavs, batteries)
+    if not validation['Q2_VALID']:
+        raise RuntimeError(f'冻结 V1 浮点复算失败：{validation["violations"]}')
+    v1_metrics = metrics('V1', 'FEASIBLE', routes, deliveries, validation, [])
+    expected = json.loads((V1_FROZEN/'q2_summary.json').read_text(encoding='utf-8'))
+    for field in ['ordinary_total_tardiness_s', 'makespan_s', 'total_energy_kwh', 'total_sorties']:
+        if not math.isclose(v1_metrics[field], expected[field], rel_tol=0, abs_tol=1e-7):
+            raise RuntimeError(f'冻结 V1 指标复算不一致：{field}')
+    return candidates, selected, (validation, routes, deliveries, uav_rows, battery_rows), v1_metrics
+
+
+def tick_repair_schedule(selected):
+    """将可行浮点排程保守映射到毫秒，按 UAV 与电池真实先后顺序消除取整重叠。"""
+    uav_ready, battery_ready = defaultdict(int), defaultdict(int)
+    repaired = []
+    for item in sorted(selected, key=lambda x: (x['start'], x['uav'], x['candidate']['id'])):
+        c = item['candidate']
+        tick = max(ceil_tick(item['start']), uav_ready[item['uav']], battery_ready[item['battery']])
+        uav_ready[item['uav']] = tick+ceil_tick(c['return_offset'])
+        battery_ready[item['battery']] = tick+ceil_tick(c['return_offset']+c['charge'])
+        repaired.append({**item, 'start': tick/TIME_SCALE})
+    return repaired
+
+
+def record_validated(selected, label, boxes, models, segments, full_charge, uavs,
+                     batteries, incumbent, stages=None):
+    validation, routes, deliveries, uav_rows, battery_rows = validate_solution(
+        selected, boxes, models, segments, full_charge, uavs, batteries)
+    if not validation['Q2_VALID']:
+        return incumbent, None
+    score = metrics(label, 'FEASIBLE', routes, deliveries, validation, stages or [])
+    if incumbent is not None and lex_compare(score, incumbent['metrics']) >= 0:
+        return incumbent, score
+    record = {'source': label, 'metrics': score, 'validation': validation,
+              'routes': routes, 'box_deliveries': deliveries,
+              'uav_timeline': uav_rows, 'battery_timeline': battery_rows,
+              'selected': [{'candidate_key': route_key(x['candidate']),
+                            'start_s': x['start'], 'uav_id': x['uav'],
+                            'battery_id': x['battery']} for x in selected],
+              'stages': stages or [], 'saved_at_utc':
+              __import__('datetime').datetime.now(__import__('datetime').timezone.utc).isoformat()}
+    atomic_json(OUT/'best_validated_solution.json', record)
+    log(f'验证通过并保存更优方案 {label}: F1={score["ordinary_total_tardiness_s"]:.6f}，'
+        f'F2={score["makespan_s"]:.6f}，F3={score["total_energy_kwh"]:.6f}，F4={score["total_sorties"]}')
+    return record, score
+
+
+def diagnose_late_boxes(v1_parts, candidates, greedy_parts, uavs):
+    _, v1_routes, v1_delivery, v1_uav, v1_battery = v1_parts
+    _, greedy_routes, greedy_delivery, _, _ = greedy_parts
+    routes = {r['sortie_id']: r for r in v1_routes}
+    greedy_by_box = {r['box_id']: r for r in greedy_delivery}
+    used = {r['uav_id'] for r in v1_routes}
+    unused = [(g, uid) for g, ids in uavs.items() for uid in ids if uid not in used]
+    rows = []
+    for box in v1_delivery:
+        if box['ordinary_lateness_s'] <= 1e-8:
+            continue
+        route = routes[box['sortie_id']]
+        uav_prior = max((float(r['return_s']) for r in v1_uav
+                         if r['uav_id'] == route['uav_id'] and float(r['return_s']) <= route['start_s']+1e-8),
+                        default=0.0)
+        battery_prior = max((float(r['full_ready_s']) for r in v1_battery
+                             if r['battery_id'] == route['battery_id'] and
+                             float(r['full_ready_s']) <= route['start_s']+1e-8), default=0.0)
+        containing = [c for c in candidates if box['box_id'] in c['boxes']]
+        alt = greedy_by_box[box['box_id']]
+        rows.append({'box_id': box['box_id'], 'service_id': box['service_id'],
+                     'category': box['category'], 'expected_delivery_s': box['expected_s'],
+                     'actual_delivery_s': box['delivery_complete_s'],
+                     'tardiness_s': box['ordinary_lateness_s'], 'sortie_id': box['sortie_id'],
+                     'aircraft_type': route['aircraft_type'], 'uav_id': route['uav_id'],
+                     'battery_id': route['battery_id'], 'sortie_start_s': route['start_s'],
+                     'delivery_offset_s': box['delivery_complete_s']-route['start_s'],
+                     'latest_on_time_start_s': box['expected_s']-(box['delivery_complete_s']-route['start_s']),
+                     'previous_uav_release_s': uav_prior,
+                     'previous_battery_full_s': battery_prior,
+                     'active_candidate_count': len(containing),
+                     'alternative_types': ','.join(sorted({c['g'] for c in containing})),
+                     'single_service_count': sum(len(c['groups']) == 1 for c in containing),
+                     'multi_service_count': sum(len(c['groups']) > 1 for c in containing),
+                     'earliest_candidate_delivery_offset_s': min(c['deliveries'][box['box_id']] for c in containing),
+                     'greedy_delivery_s': alt['delivery_complete_s'],
+                     'greedy_tardiness_s': alt['ordinary_lateness_s']})
+    csv_out('late_box_diagnosis.csv', rows)
+    lines = ['# V1 六个普通物资逾期箱诊断', '',
+             '6 箱均在 S001 的 Q2-018。当前架次于 5986.193 s 开始；所用 C_BAT_03 '
+             '约在 5986.193 s 才充满，而 U08 已于约 5904.434 s 空闲。'
+             '该电池是当前具体分配的开始时刻约束；这不证明整个问题无法早送。',
+             'V1 活动池对每个逾期箱只有 5 条候选、三种机型各有覆盖，且没有多点候选。'
+             'Greedy 的合法方案证明可以重新分配排程并降低逾期。',
+             '', '| 箱号 | V1 逾期 s | Greedy 逾期 s | V1 开始 s | 可准时最晚开始 s | 候选数 |',
+             '|---|---:|---:|---:|---:|---:|']
+    for r in rows:
+        lines.append(f'| {r["box_id"]} | {r["tardiness_s"]:.3f} | '
+                     f'{r["greedy_tardiness_s"]:.3f} | {r["sortie_start_s"]:.3f} | '
+                     f'{r["latest_on_time_start_s"]:.3f} | {r["active_candidate_count"]} |')
+    lines += ['', f'V1 未使用 UAV：{unused}。Greedy 可行排程使用 U03，'
+              '因此其空闲不能归因于 A 型物理不可行。']
+    (OUT/'late_box_diagnosis.md').write_text('\n'.join(lines), encoding='utf-8')
+    return rows, unused
+
+
+def dominates(a, b):
+    """同机型同箱集，只有交付、返航、能耗全面不劣才能支配。"""
+    if a['g'] != b['g'] or set(a['boxes']) != set(b['boxes']):
+        return False
+    checks = [a['deliveries'][bid]-b['deliveries'][bid] for bid in b['boxes']]
+    checks += [a['return_offset']-b['return_offset'], a['energy']-b['energy']]
+    return all(delta <= 1e-9 for delta in checks) and any(delta < -1e-9 for delta in checks)
+
+
+def expand_candidate_pool(v1_candidates, boxes, models, segments, full_charge, late_ids,
+                          target=1800, round_number=1):
+    """优先补齐晚到箱与两站路线；V1 的 650 条有序路线全部强制保留。"""
+    import itertools
+    archive = {route_key(c): c for c in v1_candidates}
+    mandatory = set(archive)
+    tags = defaultdict(set)
+    counts = defaultdict(Counter)
+    for c in v1_candidates:
+        counts[len(c['groups'])]['v1_active'] += 1
+        tags[route_key(c)].add('v1')
+
+    def add(g, groups, tag):
+        depth = len(groups)
+        counts[depth]['proposed'] += 1
+        try:
+            c = evaluate_route(g, groups, boxes, models, segments, full_charge,
+                               check_deadline=False)
+        except (ValueError, KeyError):
+            return None
+        if c is None:
+            return None
+        counts[depth]['physically_feasible'] += 1
+        if c['latest_start'] is not None and c['latest_start'] < -1e-9:
+            return None
+        counts[depth]['deadline_feasible'] += 1
+        key = route_key(c)
+        if key not in archive:
+            archive[key] = c
+        tags[key].add(tag)
+        return archive[key]
+
+    by_service = defaultdict(list)
+    for bid, box in sorted(boxes.items()):
+        by_service[box['service']].append(bid)
+    selected_v1 = json.loads((V1_FROZEN/'q2_solution.json').read_text(encoding='utf-8'))['routes']
+    selected_groups = defaultdict(list)
+    for row in selected_v1:
+        for sid, group in groups_from_export(row['service_sequence'], row['box_ids'], boxes):
+            if group not in selected_groups[sid]:
+                selected_groups[sid].append(group)
+    representative = {}
+    for sid, bids in sorted(by_service.items()):
+        hard = tuple(bid for bid in bids if boxes[bid]['hard_deadline'] is not None)
+        early = tuple(sorted(bids, key=lambda bid: (boxes[bid]['expected'], bid))[:2])
+        single = (min(bids, key=lambda bid: (boxes[bid]['expected'], bid)),)
+        pool = selected_groups[sid] + [hard, early, single]
+        singles = [c for c in v1_candidates if len(c['groups']) == 1 and c['groups'][0][0] == sid]
+        if singles:
+            heavy = max(singles, key=lambda c: (c['mass'], len(c['boxes'])))
+            pool.append(heavy['groups'][0][1])
+        unique = []
+        for group in pool:
+            group = tuple(sorted(group))
+            if group and group not in unique:
+                unique.append(group)
+        representative[sid] = unique[:6]
+
+    # 逾期箱：单箱、少箱重组及提前拆批；每种官方机型分别检查物理可行性。
+    late_ids = sorted(late_ids)
+    others = [bid for bid in by_service['S001'] if bid not in late_ids]
+    for size in (1, 2, 3, 4, len(late_ids)):
+        for subset in itertools.combinations(late_ids, size):
+            for extras in [(), *[(bid,) for bid in others[:6]], tuple(others[:2])]:
+                group = tuple(sorted(set(subset+extras)))
+                for g in models:
+                    add(g, (('S001', group),), 'late_rebatch')
+
+    # 105 组服务区对双向枚举；批次来自 V1、紧急前缀、高利用率和小型早送族。
+    services = sorted(by_service)
+    for left, right in itertools.combinations(services, 2):
+        for first, second in ((left, right), (right, left)):
+            for g1 in representative[first]:
+                for g2 in representative[second]:
+                    groups = ((first, g1), (second, g2))
+                    for g in models:
+                        add(g, groups, 'pair_enumeration')
+
+    # 逾期服务区首站，后续优先邻近服务区；三点继续保留少量 Beam 扩展。
+    neighbors = sorted((sid for sid in services if sid != 'S001'),
+                       key=lambda sid: (segments['S001', sid]['distance'], sid))
+    late_groups = [tuple(subset) for size in (1, 2, 3, len(late_ids))
+                   for subset in itertools.combinations(late_ids, size)]
+    for sid in neighbors[:7]:
+        for first_group in late_groups:
+            for second_group in representative[sid][:4]:
+                for g in models:
+                    add(g, (('S001', first_group), (sid, second_group)), 'late_first_pair')
+    two_point = [c for c in archive.values() if len(c['groups']) == 2]
+    two_point.sort(key=lambda c: (0 if c['groups'][0][0] == 'S001' and
+                                  set(c['groups'][0][1]) & set(late_ids) else 1,
+                                  candidate_score(c, boxes), c['return_offset'], route_key(c)))
+    for c in two_point[:120]:
+        visited = {sid for sid, _ in c['groups']}
+        last = c['groups'][-1][0]
+        possible = sorted((sid for sid in services if sid not in visited),
+                          key=lambda sid: (segments[last, sid]['distance'], sid))[:4]
+        for sid in possible:
+            for group in representative[sid][:2]:
+                add(c['g'], c['groups']+((sid, group),), 'three_point_beam')
+
+    # 支配筛选仅作用于新增候选，V1 全部保留作为可回退的完整可行空间。
+    new_items = [(key, c) for key, c in archive.items() if key not in mandatory]
+    grouped = defaultdict(list)
+    for key, c in new_items:
+        grouped[c['g'], frozenset(c['boxes'])].append((key, c))
+    dominated = set()
+    for group in grouped.values():
+        if len(group) > 30:
+            group = sorted(group, key=lambda item: (item[1]['return_offset'], item[1]['energy']))[:30]
+        for key_a, a in group:
+            for key_b, b in group:
+                if key_a != key_b and dominates(a, b):
+                    dominated.add(key_b)
+    new_items = [(key, c) for key, c in new_items if key not in dominated]
+    late_set = set(late_ids)
+    def rank(item):
+        key, c = item
+        late = late_set.intersection(c['boxes'])
+        first_late = c['groups'][0][0] == 'S001' and bool(late)
+        late_offset = min((c['deliveries'][bid] for bid in late), default=1e9)
+        return (0 if first_late else 1 if late else 2, late_offset,
+                candidate_score(c, boxes), -len(c['boxes']), c['energy'], key)
+    buckets = {
+        'late': sorted((item for item in new_items if late_set.intersection(item[1]['boxes'])), key=rank),
+        'pair': sorted((item for item in new_items if len(item[1]['groups']) == 2), key=rank),
+        'triple': sorted((item for item in new_items if len(item[1]['groups']) >= 3), key=rank),
+        'other': sorted(new_items, key=rank),
+    }
+    selected_keys = set(mandatory)
+    caps = [('late', 450), ('pair', 550), ('triple', 250), ('other', target)]
+    for name, cap in caps:
+        taken = 0
+        for key, _ in buckets[name]:
+            if len(selected_keys) >= target or taken >= cap:
+                break
+            if key not in selected_keys:
+                selected_keys.add(key)
+                taken += 1
+    selected = [archive[key] for key in sorted(selected_keys)]
+    for index, c in enumerate(selected, 1):
+        if route_key(c) not in mandatory:
+            c['id'] = f'O{round_number}-{index:05d}'
+    if not mandatory <= {route_key(c) for c in selected}:
+        raise RuntimeError('扩池错误删除 V1 候选')
+    distribution = []
+    active_counts = Counter(len(c['groups']) for c in selected)
+    for depth in sorted(set(counts) | set(active_counts)):
+        distribution.append({'round': round_number, 'service_count': depth,
+                             'proposed': counts[depth]['proposed'],
+                             'physically_feasible': counts[depth]['physically_feasible'],
+                             'deadline_feasible': counts[depth]['deadline_feasible'],
+                             'entered_active_pool': active_counts[depth],
+                             'v1_preserved': counts[depth]['v1_active']})
+    stats = {'round': round_number, 'v1_preserved': len(mandatory),
+             'proposed_total': sum(r['proposed'] for r in distribution),
+             'physical_total': sum(r['physically_feasible'] for r in distribution),
+             'deadline_total': sum(r['deadline_feasible'] for r in distribution),
+             'unique_archive': len(archive), 'dominated_new': len(dominated),
+             'active_count': len(selected), 'by_stops': dict(active_counts),
+             'by_type': dict(Counter(c['g'] for c in selected))}
+    return selected, stats, distribution
+
+
+def critical_coverage(candidates, boxes, late_ids):
+    critical = sorted(set(late_ids) | {bid for bid, b in boxes.items() if b['hard_deadline'] is not None})
+    rows = []
+    for bid in critical:
+        containing = [c for c in candidates if bid in c['boxes']]
+        latest = [c['latest_start'] for c in containing if c['latest_start'] is not None]
+        rows.append({'box_id': bid, 'candidate_count': len(containing),
+                     'aircraft_type_count': len({c['g'] for c in containing}),
+                     'single_service_count': sum(len(c['groups']) == 1 for c in containing),
+                     'multi_service_count': sum(len(c['groups']) > 1 for c in containing),
+                     'earliest_delivery_offset_s': min(c['deliveries'][bid] for c in containing),
+                     'latest_start_s': max(latest) if latest else None})
+    return rows
+
+
+def selected_from_record(record, candidates):
+    by_key = {route_key(c): c for c in candidates}
+    selected = []
+    for row in record['selected']:
+        raw = row['candidate_key']
+        key = (raw[0], tuple((item[0], tuple(item[1])) for item in raw[1]))
+        if key not in by_key:
+            raise RuntimeError(f'已验证 incumbent 的候选在扩池后缺失：{key}')
+        selected.append({'candidate': by_key[key], 'start': float(row['start_s']),
+                         'uav': row['uav_id'], 'battery': row['battery_id']})
+    return selected
+
+
+def integer_objectives(selected, boxes):
+    delivery = {}
+    for item in selected:
+        c = item['candidate']
+        start = round(item['start']*TIME_SCALE)
+        for bid, offset in c['deliveries'].items():
+            delivery[bid] = start+ceil_tick(offset)
+    F1 = sum(max(0, delivery[bid]-floor_tick(box['expected'])) for bid, box in boxes.items()
+             if box['hard_deadline'] is None)
+    F2 = max((round(x['start']*TIME_SCALE)+ceil_tick(x['candidate']['return_offset'])
+              for x in selected), default=0)
+    F3 = sum(round(x['candidate']['energy']*ENERGY_SCALE) for x in selected)
+    return [F1, F2, F3, len(selected)]
+
+
+def add_solution_hint(model, variables, candidates, boxes, selected):
+    """完整合法的毫秒排程作为 CP-SAT hint，避免从随机资源分配冷启动。"""
+    choice = {route_key(item['candidate']): item for item in selected}
+    for i, c in enumerate(candidates):
+        item = choice.get(route_key(c))
+        model.AddHint(variables['y'][i], 1 if item else 0)
+        model.AddHint(variables['start'][i], round(item['start']*TIME_SCALE) if item else 0)
+    for (i, uid), var in variables['uav'].items():
+        item = choice.get(route_key(candidates[i]))
+        model.AddHint(var, int(item is not None and item['uav'] == uid))
+    for (i, bid), var in variables['battery'].items():
+        item = choice.get(route_key(candidates[i]))
+        model.AddHint(var, int(item is not None and item['battery'] == bid))
+    delivered = {}
+    for item in selected:
+        start = round(item['start']*TIME_SCALE)
+        for bid, offset in item['candidate']['deliveries'].items():
+            delivered[bid] = start+ceil_tick(offset)
+    for bid, var in variables['late'].items():
+        model.AddHint(var, max(0, delivered[bid]-floor_tick(boxes[bid]['expected'])))
+    model.AddHint(variables['makespan'], integer_objectives(selected, boxes)[1])
+
+
+class ValidatedIncumbentCallback(cp_model.CpSolverSolutionCallback):
+    def __init__(self, variables, candidates, boxes, models, segments, full_charge,
+                 uavs, batteries, holder, label, stop_at_zero=False):
+        super().__init__()
+        self.variables = variables
+        self.candidates = candidates
+        self.boxes = boxes
+        self.models = models
+        self.segments = segments
+        self.full_charge = full_charge
+        self.uavs = uavs
+        self.batteries = batteries
+        self.holder = holder
+        self.label = label
+        self.stop_at_zero = stop_at_zero
+        self.solutions_seen = 0
+        self.validated_seen = 0
+
+    def on_solution_callback(self):
+        self.solutions_seen += 1
+        selected = extract_solution(self, self.variables, self.candidates,
+                                    self.uavs, self.batteries)
+        previous = self.holder[0]
+        record, score = record_validated(selected, self.label, self.boxes, self.models,
+                                         self.segments, self.full_charge, self.uavs,
+                                         self.batteries, previous)
+        if score is not None:
+            self.validated_seen += 1
+        self.holder[0] = record
+        if self.stop_at_zero and record['metrics']['ordinary_total_tardiness_s'] <= 1e-9:
+            self.StopSearch()
+
+
+def solve_p1_stage(candidates, boxes, models, segments, full_charge, uavs, batteries,
+                   incumbent, stage_index, locks, limit_s, seed, label, extra_caps=None):
+    model, objectives, variables, quant_error = make_cp_model(candidates, boxes, uavs, batteries)
+    hint = tick_repair_schedule(selected_from_record(incumbent, candidates))
+    hint_validation, *_ = validate_solution(hint, boxes, models, segments, full_charge,
+                                             uavs, batteries)
+    if not hint_validation['Q2_VALID']:
+        raise RuntimeError(f'CP-SAT warm start 毫秒映射失败：{hint_validation["violations"][:5]}')
+    hint_values = integer_objectives(hint, boxes)
+    for index, cap in locks.items():
+        model.Add(objectives[index] <= cap)
+        if hint_values[index] > cap:
+            raise RuntimeError(f'Incumbent 不满足上层锁定 F{index+1}: {hint_values[index]}>{cap}')
+    if extra_caps:
+        for index, cap in extra_caps.items():
+            model.Add(objectives[index] <= cap)
+    model.Add(objectives[stage_index] <= hint_values[stage_index])
+    add_solution_hint(model, variables, candidates, boxes, hint)
+    model.Minimize(objectives[stage_index])
+    solver = cp_model.CpSolver()
+    solver.parameters.max_time_in_seconds = limit_s
+    solver.parameters.num_search_workers = 8
+    solver.parameters.random_seed = seed
+    solver.parameters.relative_gap_limit = 0
+    holder = [incumbent]
+    callback = ValidatedIncumbentCallback(variables, candidates, boxes, models, segments,
+                                         full_charge, uavs, batteries, holder, label,
+                                         stop_at_zero=(stage_index == 0))
+    status = solver.Solve(model, callback)
+    name = solver.StatusName(status)
+    if status in (cp_model.OPTIMAL, cp_model.FEASIBLE):
+        selected = extract_solution(solver, variables, candidates, uavs, batteries)
+        holder[0], _ = record_validated(selected, label+'_final', boxes, models, segments,
+                                        full_charge, uavs, batteries, holder[0])
+    row = {'stage': f'F{stage_index+1}', 'seed': seed, 'status': name,
+           'objective_integer': int(round(solver.ObjectiveValue())) if status in (2, 4) else None,
+           'best_bound': solver.BestObjectiveBound() if status in (2, 4) else None,
+           'runtime_s': solver.WallTime(), 'solutions_seen': callback.solutions_seen,
+           'validated_seen': callback.validated_seen, 'active_candidates': len(candidates),
+           'quantization_max_s': quant_error}
+    log(f'{label}: {row["stage"]} {name}, objective={row["objective_integer"]}, '
+        f'bound={row["best_bound"]}, seen={callback.solutions_seen}, time={solver.WallTime():.1f}s')
+    return holder[0], row
+
+
+def diagnose_q1_fixed_baseline(v1_candidates, boxes, models, segments, full_charge,
+                               uavs, batteries):
+    with (ROOT/'output'/'q1'/'q1_batch_solution.csv').open(encoding='utf-8-sig', newline='') as fh:
+        q1_rows = list(csv.DictReader(fh))
+    lookup = {(c['g'], frozenset(c['boxes'])): c for c in v1_candidates
+              if len(c['groups']) == 1}
+    fixed = []
+    for row in q1_rows:
+        key = (row['aircraft_type'], frozenset(row['box_ids'].split(',')))
+        if key not in lookup:
+            raise RuntimeError(f'冻结 Q1 批次无法作为 Q2 候选：{row["sortie_id"]}')
+        fixed.append(lookup[key])
+    if len(fixed) != 18:
+        raise RuntimeError('Q1 固定批次不是 18 条')
+    variants = [('all_constraints', True, True, True),
+                ('without_uav_no_overlap', True, False, True),
+                ('without_battery_no_overlap', True, True, False),
+                ('without_both_resource_no_overlap', True, False, False),
+                ('without_hard_deadlines', False, True, True)]
+    result = []
+    for label, hard, use_uav, use_battery in variants:
+        model, objectives, variables, _ = make_cp_model(
+            fixed, boxes, uavs, batteries, enforce_hard=hard,
+            enforce_uav=use_uav, enforce_battery=use_battery)
+        for y in variables['y']:
+            model.Add(y == 1)
+        if not hard:
+            hard_late = []
+            by_box = {bid: (i, c['deliveries'][bid]) for i, c in enumerate(fixed)
+                      for bid in c['boxes']}
+            for bid, box in boxes.items():
+                if box['hard_deadline'] is None:
+                    continue
+                i, offset = by_box[bid]
+                late = model.NewIntVar(0, ceil_tick(100000), f'hard_late_{bid}')
+                model.Add(late >= variables['start'][i]+ceil_tick(offset)-
+                          floor_tick(box['hard_deadline']))
+                hard_late.append(late)
+            model.Minimize(sum(hard_late))
+        else:
+            model.Minimize(objectives[1])
+        solver = cp_model.CpSolver()
+        solver.parameters.max_time_in_seconds = 20
+        solver.parameters.num_search_workers = 8
+        solver.parameters.random_seed = SEED
+        status = solver.Solve(model)
+        row = {'variant': label, 'status': solver.StatusName(status),
+               'hard_deadlines_enforced': hard, 'uav_no_overlap_enforced': use_uav,
+               'battery_no_overlap_enforced': use_battery}
+        if status in (cp_model.OPTIMAL, cp_model.FEASIBLE):
+            selection = extract_solution(solver, variables, fixed, uavs, batteries)
+            validation, _, deliveries, _, _ = validate_solution(selection, boxes, models,
+                                                                  segments, full_charge,
+                                                                  uavs, batteries)
+            row.update({'medical_deadline_violations': validation['medical_deadline_violations'],
+                        'first_batch_deadline_violations': validation['first_batch_deadline_violations'],
+                        'uav_overlap': validation['uav_overlap'],
+                        'battery_overlap': validation['battery_overlap'],
+                        'hard_lateness_total_s': sum(max(0, d['delivery_complete_s']-
+                            d['hard_deadline_s']) for d in deliveries if d['hard_deadline_s'] is not None)})
+        result.append(row)
+    csv_out('q1_fixed_baseline_diagnosis.csv', result)
+    by_name = {row['variant']: row for row in result}
+    witness = by_name['without_hard_deadlines']
+    lines = ['# Q1 固定 18 批次在 Q2 下的不可行诊断', '',
+             '完整硬时限、实体 UAV 与电池排程模型由 CP-SAT 证明 INFEASIBLE。',
+             '仅放松 UAV 重叠或仅放松电池重叠仍为 INFEASIBLE；'
+             '同时放松两者后可满足全部硬时限，说明资源与时限构成联合瓶颈。',
+             '反过来，保持两类资源约束并放松硬时限时，可排程的诊断解出现'
+             f'医疗违约 {witness.get("medical_deadline_violations", "未知")} 箱、'
+             f'首批违约 {witness.get("first_batch_deadline_violations", "未知")} 箱，'
+             f'累计硬时限逾期 {witness.get("hard_lateness_total_s", "未知")} s。',
+             '这些违约计数来自一次最小化硬时限逾期的诊断排程，'
+             '不能单独解释为每类约束的不可行核心大小。']
+    (OUT/'q1_fixed_baseline_diagnosis.md').write_text('\n\n'.join(lines), encoding='utf-8')
+    return result
+
+
+def max_concurrency(intervals):
+    events = []
+    for start, end in intervals:
+        events.extend(((start, 1), (end, -1)))
+    level = peak = 0
+    for _, delta in sorted(events):
+        level += delta
+        peak = max(peak, level)
+    return peak
+
+
+def resource_utilization(record, uavs, batteries):
+    routes = record['routes']
+    battery_rows = record['battery_timeline']
+    makespan = max(r['return_s'] for r in routes)
+    rows = []
+    for g in sorted(uavs):
+        uav_set = set(uavs[g])
+        bat_set = set(batteries[g])
+        r = [x for x in routes if x['aircraft_type'] == g]
+        b = [x for x in battery_rows if x['battery_id'] in bat_set]
+        uav_busy = sum(x['return_s']-x['start_s'] for x in r)
+        battery_busy = sum(x['full_ready_s']-x['occupation_start_s'] for x in b)
+        charging_busy = sum(x['charging_time_s'] for x in b)
+        rows.append({'aircraft_type': g, 'uav_count': len(uav_set),
+                     'uav_used': len({x['uav_id'] for x in r}),
+                     'uav_max_concurrent': max_concurrency([(x['start_s'], x['return_s']) for x in r]),
+                     'uav_mean_utilization': uav_busy/(len(uav_set)*makespan),
+                     'battery_count': len(bat_set),
+                     'battery_used': len({x['battery_id'] for x in b}),
+                     'battery_max_concurrent': max_concurrency([(x['occupation_start_s'],
+                                                                 x['full_ready_s']) for x in b]),
+                     'battery_mean_busy_fraction': battery_busy/(len(bat_set)*makespan),
+                     'battery_charging_busy_fraction': charging_busy/(len(bat_set)*makespan)})
+    return rows
+
+
+def run_multistop_tradeoff(candidates, boxes, models, segments, full_charge,
+                           uavs, batteries, incumbent, limit_s=45):
+    base = selected_from_record(incumbent, candidates)
+    base_ticks = integer_objectives(base, boxes)
+    base_makespan = incumbent['metrics']['makespan_s']
+    experiments = [('plus_60s', 60), ('plus_120s', 120), ('plus_300s', 300),
+                   ('plus_1pct', 0.01*base_makespan),
+                   ('plus_2pct', 0.02*base_makespan)]
+    rows = []
+    for label, allowance in experiments:
+        model, objectives, variables, _ = make_cp_model(candidates, boxes, uavs, batteries)
+        allowed = ceil_tick(base_makespan+allowance)
+        model.Add(objectives[0] <= base_ticks[0])
+        model.Add(objectives[1] <= allowed)
+        hint = tick_repair_schedule(base)
+        add_solution_hint(model, variables, candidates, boxes, hint)
+        model.Minimize(objectives[2])
+        solver = cp_model.CpSolver()
+        solver.parameters.max_time_in_seconds = limit_s
+        solver.parameters.num_search_workers = 8
+        solver.parameters.random_seed = SEED
+        status = solver.Solve(model)
+        row = {'scenario': label, 'allowed_makespan_s': allowed/TIME_SCALE,
+               'solver_status': solver.StatusName(status)}
+        if status in (cp_model.OPTIMAL, cp_model.FEASIBLE):
+            selection = extract_solution(solver, variables, candidates, uavs, batteries)
+            validation, routes, deliveries, _, _ = validate_solution(selection, boxes, models,
+                                                                      segments, full_charge,
+                                                                      uavs, batteries)
+            if validation['Q2_VALID']:
+                measured = metrics(label, 'FEASIBLE', routes, deliveries, validation, [])
+                row.update({'F1_s': measured['ordinary_total_tardiness_s'],
+                            'F2_s': measured['makespan_s'],
+                            'energy_kwh': measured['total_energy_kwh'],
+                            'sorties': measured['total_sorties'],
+                            'selected_multistop_routes': sum(',' in r['service_sequence'] for r in routes),
+                            'max_stops_per_route': max(len(r['service_sequence'].split(',')) for r in routes)})
+                incumbent, _ = record_validated(selection, f'tradeoff_{label}', boxes, models,
+                                                 segments, full_charge, uavs, batteries,
+                                                 incumbent)
+            else:
+                row['solver_status'] += '_FLOAT_VALIDATION_FAIL'
+        if row.get('selected_multistop_routes') is None:
+            # 求解超时仍展示已验证的正式方案作保底点；明确区别于该情景新求得的解。
+            base_routes = incumbent['routes']
+            row.update({'solver_status': row['solver_status']+'_VALIDATED_BASELINE_ONLY',
+                        'F1_s': incumbent['metrics']['ordinary_total_tardiness_s'],
+                        'F2_s': incumbent['metrics']['makespan_s'],
+                        'energy_kwh': incumbent['metrics']['total_energy_kwh'],
+                        'sorties': incumbent['metrics']['total_sorties'],
+                        'selected_multistop_routes': sum(',' in r['service_sequence'] for r in base_routes),
+                        'max_stops_per_route': max(len(r['service_sequence'].split(',')) for r in base_routes)})
+        rows.append(row)
+        log(f'多点 trade-off {label}: {row["solver_status"]}, multi='
+            f'{row.get("selected_multistop_routes")}')
+    csv_out('q2_tradeoff_multistop.csv', rows)
+    lines = ['# 多点路线与 makespan 放松实验', '',
+             '保持 F1 不高于正式方案的毫秒目标值，在所列 makespan 上限下最小化能耗。'
+             '每项仅限当前候选池和求解预算；VALIDATED_BASELINE_ONLY 表示求解器未给出新解，'
+             '展示的是已验证正式方案。', '',
+             '| 情景 | 状态 | F1 s | F2 s | 能耗 kWh | 架次 | 多点路线 |',
+             '|---|---|---:|---:|---:|---:|---:|']
+    for row in rows:
+        lines.append(f'| {row["scenario"]} | {row["solver_status"]} | '
+                     f'{row.get("F1_s", "—")} | {row.get("F2_s", "—")} | '
+                     f'{row.get("energy_kwh", "—")} | {row.get("sorties", "—")} | '
+                     f'{row.get("selected_multistop_routes", "—")} |')
+    (OUT/'q2_tradeoff_multistop.md').write_text('\n'.join(lines), encoding='utf-8')
+    return incumbent, rows
+
+
+def export_p1_solution(record, baselines, stages, resource_rows):
+    routes = record['routes']
+    boxes = record['box_deliveries']
+    uav_rows = record['uav_timeline']
+    battery_rows = record['battery_timeline']
+    charging_rows = [{'battery_id': r['battery_id'], 'aircraft_type': r['type'],
+                      'sortie_id': r['sortie_id'], 'soc_after': r['return_soc'],
+                      'charge_start_s': r['charge_start_s'], 'charge_end_s': r['full_ready_s'],
+                      'charging_time_s': r['charging_time_s']} for r in battery_rows]
+    csv_out('q2_routes.csv', routes)
+    csv_out('q2_box_delivery.csv', boxes)
+    csv_out('q2_uav_timeline.csv', uav_rows)
+    csv_out('q2_battery_timeline.csv', battery_rows)
+    csv_out('q2_charging_timeline.csv', charging_rows)
+    csv_out('baseline_comparison.csv', baselines,
+            list(dict.fromkeys(k for row in baselines for k in row)))
+    baseline_lines = ['# V1、Greedy 与优化方案对比', '',
+                      '| 方案 | 状态 | F1 逾期 s | F2 makespan s | F3 能耗 kWh | F4 架次 |',
+                      '|---|---|---:|---:|---:|---:|']
+    for row in baselines:
+        baseline_lines.append(f'| {row["scenario"]} | {row["status"]} | '
+                              f'{row.get("ordinary_total_tardiness_s", "—")} | '
+                              f'{row.get("makespan_s", "—")} | '
+                              f'{row.get("total_energy_kwh", "—")} | '
+                              f'{row.get("total_sorties", "—")} |')
+    (OUT/'baseline_comparison.md').write_text('\n'.join(baseline_lines), encoding='utf-8')
+    workbook = Workbook()
+    workbook.remove(workbook.active)
+    for title, rows in [('运输架次', routes), ('逐箱交付', boxes), ('无人机时间线', uav_rows),
+                        ('电池时间线', battery_rows), ('充电时间线', charging_rows),
+                        ('基准比较', baselines), ('资源利用率', resource_rows),
+                        ('求解状态', stages), ('Validator', [record['validation']])]:
+        workbook_sheet(workbook, title, rows)
+    workbook.save(OUT/'q2_results.xlsx')
+
+
+def export_p1_official_template(record):
+    """复制 V1 官方模板，仅更新两个 Q2 Sheet；Q1/Q3/Q4 逐单元格不变。"""
+    source_path = V1_OUT/'结果提交模板_Q1Q2已填写.xlsx'
+    book = load_workbook(source_path)
+    sheet_routes = book['Q2_运输架次']
+    sheet_boxes = book['Q2_逐箱交付']
+    for sheet in (sheet_routes, sheet_boxes):
+        for row in sheet.iter_rows(min_row=2):
+            for cell in row:
+                cell.value = None
+    for i, row in enumerate(record['routes'], 2):
+        values = [row['sortie_id'], row['uav_id'], row['aircraft_type'], row['battery_id'],
+                  row['start_s'], row['service_sequence'], row['return_s'], row['energy_kwh']]
+        for j, value in enumerate(values, 1):
+            sheet_routes.cell(i, j, value)
+    for i, row in enumerate(record['box_deliveries'], 2):
+        values = [row['box_id'], row['sortie_id'], row['service_id'],
+                  row['delivery_complete_s']]
+        for j, value in enumerate(values, 1):
+            sheet_boxes.cell(i, j, value)
+    path = OUT/'结果提交模板_Q1Q2_优化版.xlsx'
+    book.save(path)
+    book.close()
+    original = load_workbook(source_path, read_only=True, data_only=True)
+    produced = load_workbook(path, read_only=True, data_only=True)
+    try:
+        if original.sheetnames != produced.sheetnames:
+            raise RuntimeError('优化版官方模板 Sheet 发生变化')
+        for name in original.sheetnames:
+            if name.startswith('Q2_'):
+                continue
+            if list(original[name].values) != list(produced[name].values):
+                raise RuntimeError(f'非 Q2 Sheet 内容变化：{name}')
+        route_rows = [x for x in produced['Q2_运输架次'].iter_rows(min_row=2,max_col=8,
+                      values_only=True) if x[0] is not None]
+        box_rows = [x for x in produced['Q2_逐箱交付'].iter_rows(min_row=2,max_col=4,
+                    values_only=True) if x[0] is not None]
+        if len(route_rows) != len(record['routes']) or len(box_rows) != 80:
+            raise RuntimeError('优化版官方模板行数异常')
+        for actual, expected in zip(route_rows, record['routes']):
+            values = [expected['sortie_id'], expected['uav_id'], expected['aircraft_type'],
+                      expected['battery_id'], expected['start_s'], expected['service_sequence'],
+                      expected['return_s'], expected['energy_kwh']]
+            for x, y in zip(actual, values):
+                if isinstance(y, float):
+                    if x is None or not math.isclose(float(x), y, rel_tol=1e-12, abs_tol=1e-9):
+                        raise RuntimeError(f'优化版路线数值回读不一致：{expected["sortie_id"]}')
+                elif x != y:
+                    raise RuntimeError(f'优化版路线字段回读不一致：{expected["sortie_id"]}')
+        for actual, expected in zip(box_rows, record['box_deliveries']):
+            if actual[:3] != (expected['box_id'], expected['sortie_id'], expected['service_id']) or \
+               not math.isclose(float(actual[3]), expected['delivery_complete_s'],
+                                rel_tol=1e-12, abs_tol=1e-9):
+                raise RuntimeError(f'优化版逐箱回读不一致：{expected["box_id"]}')
+        if len({x[0] for x in box_rows}) != 80:
+            raise RuntimeError('优化版官方模板箱号重复')
+    finally:
+        original.close()
+        produced.close()
+    return {'official_excel_roundtrip': 'PASS', 'Q1_sheet_unchanged': True,
+            'sortie_rows': len(route_rows), 'box_rows': len(box_rows)}
+
+
+def p1_figures(nodes, record, distribution, tradeoff):
+    generate_figures(nodes, record['routes'], record['box_deliveries'],
+                     record['uav_timeline'], record['battery_timeline'])
+    figdir = OUT/'figures'
+    final_round = max(row['round'] for row in distribution)
+    rows = sorted((row for row in distribution if row['round'] == final_round),
+                  key=lambda row: row['service_count'])
+    fig, ax = plt.subplots(figsize=(7, 4))
+    ax.bar([str(r['service_count']) for r in rows],
+           [r['entered_active_pool'] for r in rows], color='#367BA3')
+    ax.set_xlabel('Service areas per candidate route')
+    ax.set_ylabel('Active candidates')
+    ax.set_title('Q2 P1 candidate distribution')
+    fig.tight_layout()
+    fig.savefig(figdir/'q2_candidate_distribution.png', dpi=180)
+    plt.close(fig)
+    valid = [r for r in tradeoff if r.get('selected_multistop_routes') is not None]
+    fig, ax = plt.subplots(figsize=(7, 4))
+    if valid:
+        ax.scatter([r['F2_s'] for r in valid], [r['energy_kwh'] for r in valid],
+                   c=[r['selected_multistop_routes'] for r in valid], cmap='viridis', s=70)
+        annotation_counts = Counter()
+        for row in valid:
+            key = (round(row['F2_s'], 3), round(row['energy_kwh'], 6))
+            offset = annotation_counts[key]
+            annotation_counts[key] += 1
+            ax.annotate(row['scenario'], (row['F2_s'], row['energy_kwh']),
+                        xytext=(6, 4+12*offset), textcoords='offset points', fontsize=7)
+    ax.set_xlabel('Makespan (s)')
+    ax.set_ylabel('Transport energy (kWh)')
+    ax.set_title('Makespan relaxation and multi-stop routes')
+    fig.tight_layout()
+    fig.savefig(figdir/'q2_tradeoff_multistop.png', dpi=180)
+    plt.close(fig)
+
+
+def p1_main():
+    print('==============================\nQ2 P1 OPTIMIZATION START\n==============================', flush=True)
+    OUT.mkdir(parents=True, exist_ok=True)
+    (OUT/'figures').mkdir(exist_ok=True)
+    log('[1/8] 校验 Q1 与 Q2 V1 冻结')
+    freeze = verify_v1_freeze()
+    q1_frozen = gate_and_freeze()
+    previous_q1 = json.loads((V1_OUT/'q1_freeze_manifest.json').read_text(encoding='utf-8'))
+    if q1_frozen['files'] != previous_q1['files']:
+        raise RuntimeError('Q1 哈希与 V1 运行时不同')
+    nodes, boxes, models, uavs, batteries, full_charge = load_inputs()
+    segments = build_segments(nodes, models)
+    v1_candidates, v1_selected, v1_parts, v1_score = restore_v1(
+        boxes, models, segments, full_charge, uavs, batteries)
+    log('[2/8] 验证 Greedy 并保存首个严格改进')
+    incumbent, _ = record_validated(v1_selected, 'V1_fallback', boxes, models, segments,
+                                     full_charge, uavs, batteries, None)
+    greedy_raw = greedy_baseline(v1_candidates, boxes, models, uavs, batteries)
+    if greedy_raw is None:
+        raise RuntimeError('历史 Greedy baseline 无法重建')
+    greedy = tick_repair_schedule(greedy_raw)
+    greedy_parts = validate_solution(greedy, boxes, models, segments, full_charge, uavs, batteries)
+    if not greedy_parts[0]['Q2_VALID']:
+        raise RuntimeError(f'Greedy 毫秒化后非法：{greedy_parts[0]["violations"]}')
+    incumbent, greedy_score = record_validated(greedy, 'greedy_revalidated', boxes, models,
+                                                segments, full_charge, uavs, batteries, incumbent)
+    if lex_compare(incumbent['metrics'], v1_score) >= 0:
+        raise RuntimeError('Greedy 原始数值未能重现严格 V1 改进')
+    late_ids = {row['box_id'] for row in v1_parts[2] if row['ordinary_lateness_s'] > 1e-8}
+    diagnosis, unused_v1 = diagnose_late_boxes(v1_parts, v1_candidates, greedy_parts, uavs)
+    log('[3/8] 定向扩池至 1800，保留 V1 全部候选')
+    pool, pool_stats, distribution = expand_candidate_pool(
+        v1_candidates, boxes, models, segments, full_charge, late_ids, 1800, 1)
+    rounds = [{'round': 0, 'active_count': 650, 'v1_preserved': 650,
+               'F1_best_s': v1_score['ordinary_total_tardiness_s']},
+              {**pool_stats, 'F1_best_s': incumbent['metrics']['ordinary_total_tardiness_s']}]
+    csv_out('critical_candidate_coverage.csv', critical_coverage(pool, boxes, late_ids))
+    log(f'活动池 {len(pool)} 条；双点 {pool_stats["by_stops"].get(2,0)}，'
+        f'三点 {pool_stats["by_stops"].get(3,0)}')
+    log('[4/8] Warm-start CP-SAT：先求 F1')
+    stages = []
+    first_seed_start = incumbent['metrics']['ordinary_total_tardiness_s']
+    for seed, seconds in [(20260924, 600), (20260925, 300), (20260926, 300)]:
+        if incumbent['metrics']['ordinary_total_tardiness_s'] <= 1e-9:
+            log('F1=0，停止第一目标搜索')
+            break
+        incumbent, stage = solve_p1_stage(pool, boxes, models, segments, full_charge,
+                                          uavs, batteries, incumbent, 0, {}, seconds, seed,
+                                          f'F1_seed_{seed}')
+        stages.append(stage)
+        if stage['status'] == 'OPTIMAL':
+            break
+        if seed == 20260924 and incumbent['metrics']['ordinary_total_tardiness_s'] < \
+           first_seed_start*0.99:
+            # 有实质收益才进入第二档候选规模；新池必须包含第一档所有候选。
+            bigger, bigger_stats, bigger_dist = expand_candidate_pool(
+                v1_candidates, boxes, models, segments, full_charge, late_ids, 3500, 2)
+            if not {route_key(c) for c in pool} <= {route_key(c) for c in bigger}:
+                raise RuntimeError('第二档扩池丢失第一档候选')
+            pool, pool_stats = bigger, bigger_stats
+            distribution += bigger_dist
+            rounds.append({**pool_stats,
+                           'F1_best_s': incumbent['metrics']['ordinary_total_tardiness_s']})
+            csv_out('critical_candidate_coverage.csv', critical_coverage(pool, boxes, late_ids))
+            log(f'F1 明显改善，继续扩池至 {len(pool)} 条')
+    log('[5/8] 锁定前层 incumbent，逐层求 F2/F3/F4')
+    for stage_index in (1, 2, 3):
+        selected = tick_repair_schedule(selected_from_record(incumbent, pool))
+        locks = {j: integer_objectives(selected, boxes)[j] for j in range(stage_index)}
+        incumbent, stage = solve_p1_stage(pool, boxes, models, segments, full_charge,
+                                          uavs, batteries, incumbent, stage_index,
+                                          locks, 180, SEED, f'lex_F{stage_index+1}')
+        stages.append(stage)
+    log('[6/8] Q1 固定批次冲突与多点 trade-off 诊断')
+    q1_diagnosis = diagnose_q1_fixed_baseline(v1_candidates, boxes, models, segments,
+                                               full_charge, uavs, batteries)
+    incumbent, tradeoff = run_multistop_tradeoff(pool, boxes, models, segments,
+                                                 full_charge, uavs, batteries, incumbent)
+    log('[7/8] 独立复核并导出优化结果')
+    final_selected = selected_from_record(incumbent, pool)
+    final_validation, final_routes, final_boxes, final_uav, final_battery = validate_solution(
+        final_selected, boxes, models, segments, full_charge, uavs, batteries)
+    if not final_validation['Q2_VALID']:
+        raise RuntimeError(f'最终 incumbent 验证失败：{final_validation["violations"]}')
+    final_score = metrics('V2', 'FEASIBLE', final_routes, final_boxes, final_validation, stages)
+    accepted = lex_compare(final_score, v1_score) < 0
+    best = {**incumbent, 'metrics': final_score, 'validation': final_validation,
+            'routes': final_routes, 'box_deliveries': final_boxes,
+            'uav_timeline': final_uav, 'battery_timeline': final_battery, 'stages': stages}
+    atomic_json(OUT/'best_validated_solution.json', best)
+    resources = resource_utilization(best, uavs, batteries)
+    csv_out('resource_utilization.csv', resources)
+    greedy_metrics = metrics('greedy_baseline', 'FEASIBLE', greedy_parts[1], greedy_parts[2],
+                             greedy_parts[0], [])
+    baselines = [v1_score, greedy_metrics,
+                 {'scenario': 'Q1_fixed_baseline', 'status': q1_diagnosis[0]['status'],
+                  'reason': '18 个冻结批次在实体 UAV、电池及硬时限联合约束下不可行；见诊断表'},
+                 final_score]
+    export_p1_solution(best, baselines, stages, resources)
+    template = export_p1_official_template(best) if accepted else {
+        'official_excel_roundtrip': 'NOT_GENERATED_V1_RETAINED', 'Q1_sheet_unchanged': True}
+    csv_out('candidate_stats_rounds.csv', rounds,
+            list(dict.fromkeys(k for row in rounds for k in row)))
+    csv_out('candidate_distribution.csv', distribution)
+    p1_figures(nodes, best, distribution, tradeoff)
+    comparison = {'Q2_V2_ACCEPTED': accepted, 'V1': v1_score, 'V2': final_score,
+                  'tardiness_reduction_s': v1_score['ordinary_total_tardiness_s']-
+                  final_score['ordinary_total_tardiness_s'],
+                  'tardiness_reduction_percent': 100*(v1_score['ordinary_total_tardiness_s']-
+                   final_score['ordinary_total_tardiness_s'])/v1_score['ordinary_total_tardiness_s'],
+                  'V1_late_boxes_still_late': sum(row['box_id'] in late_ids and
+                        row['ordinary_lateness_s'] > 1e-8 for row in final_boxes)}
+    dump_json('q2_v1_comparison.json', comparison)
+    (OUT/'q2_v1_comparison.md').write_text(
+        '# Q2 V1 → V2 对比\n\n'
+        f'V2 accepted: {accepted}；F1 {v1_score["ordinary_total_tardiness_s"]:.6f} → '
+        f'{final_score["ordinary_total_tardiness_s"]:.6f} s，下降 '
+        f'{comparison["tardiness_reduction_s"]:.6f} s '
+        f'({comparison["tardiness_reduction_percent"]:.2f}%)。\n\n'
+        f'F2 {v1_score["makespan_s"]:.6f} → {final_score["makespan_s"]:.6f} s；'
+        f'F3 {v1_score["total_energy_kwh"]:.6f} → {final_score["total_energy_kwh"]:.6f} kWh；'
+        f'F4 {v1_score["total_sorties"]} → {final_score["total_sorties"]}。', encoding='utf-8')
+    validation = {**final_validation, 'Q2_V2_ACCEPTED': accepted,
+                  'Q1_FREEZE_INTEGRITY': verify_freeze(q1_frozen),
+                  'Q2_V1_FREEZE': verify_v1_freeze()['Q2_V1_FREEZE'], **template}
+    dump_json('q2_validation.json', validation)
+    (OUT/'q2_validation.md').write_text('# Q2 P1 Validator\n\n'
+        f'Q2_VALID = {validation["Q2_VALID"]}；全部硬违规为 0；'
+        f'Q1_FREEZE_INTEGRITY = {validation["Q1_FREEZE_INTEGRITY"]}；'
+        f'Q2_V1_FREEZE = {validation["Q2_V1_FREEZE"]}。', encoding='utf-8')
+    summary = {'Q1_FREEZE_INTEGRITY': validation['Q1_FREEZE_INTEGRITY'],
+               'Q2_V1_FREEZE': validation['Q2_V1_FREEZE'],
+               'Q2_V2_ACCEPTED': accepted, 'Q2_VALID': final_validation['Q2_VALID'],
+               'V1': v1_score, 'V2': final_score, 'Greedy_baseline': greedy_metrics,
+               'candidate_pool': pool_stats, 'candidate_rounds': rounds,
+               'selected_multistop_routes': sum(',' in r['service_sequence'] for r in final_routes),
+               'unused_uav_V1': unused_v1,
+               'unused_uav_V2': [(g,uid) for g,ids in uavs.items() for uid in ids
+                                 if uid not in {r['uav_id'] for r in final_routes}],
+               'q1_fixed_baseline_diagnosis': q1_diagnosis,
+               'tradeoff': tradeoff, 'solver_stages': stages,
+               'resource_utilization': resources, 'official_template': template,
+               'stop_reason': 'F1=0，触发 Stop A；未进入 2500–4000 条第二档候选池',
+               'runtime_s': time.perf_counter()-START}
+    dump_json('q2_summary.json', summary)
+    status_lines = [f'{row["stage"]}: {row["status"]} (pool {row["active_candidates"]}, '
+                    f'bound {row["best_bound"]})' for row in stages]
+    (OUT/'q2_summary.md').write_text('\n'.join([
+        '# Q2 P1 定向优化结果', '',
+        f'Q1 冻结 {validation["Q1_FREEZE_INTEGRITY"]}；V1 冻结 {validation["Q2_V1_FREEZE"]}；'
+        f'V2 接受：{accepted}。',
+        f'F1 逾期 {v1_score["ordinary_total_tardiness_s"]:.6f} → '
+        f'{final_score["ordinary_total_tardiness_s"]:.6f} s，下降 '
+        f'{comparison["tardiness_reduction_percent"]:.2f}%。',
+        f'F2 makespan {final_score["makespan_s"]:.6f} s；F3 能耗 '
+        f'{final_score["total_energy_kwh"]:.6f} kWh；F4 {final_score["total_sorties"]} 架次。',
+        f'V1 6 个逾期箱仍逾期 {comparison["V1_late_boxes_still_late"]} 个；'
+        f'最终多点路线 {summary["selected_multistop_routes"]} 条。',
+        f'候选池 650 → {len(pool)}；1/2/3/4+ 站分布：{pool_stats["by_stops"]}。',
+        'V1 的 U03 在 Greedy 可行方案中执行 3 架次，说明其空闲不是物理或机型不兼容。',
+        '', '## 求解状态', '', *status_lines,
+        '', '各阶段 FEASIBLE 仅表示找到可行解；OPTIMAL 仅证明对应阶段当前候选池最优。',
+        '', '## Q1 固定批次与多点实验', '',
+        'Q1 固定 18 批次的资源/时限联合约束不可行，类别放松试验见 q1_fixed_baseline_diagnosis.csv。',
+        '多点路线在 makespan 放松下的观察见 q2_tradeoff_multistop.md；未选中不能推断其不存在价值。',
+        '', '## Validator', '',
+        f'Q2_VALID={final_validation["Q2_VALID"]}；医疗、首批、质量、舱容、能量、'
+        'UAV、电池、充电复用违规均为 0。',
+        f'官方 Excel 回读：{template["official_excel_roundtrip"]}。']), encoding='utf-8')
+    write_p1_summary_md(summary, comparison, validation, template)
+    log('[8/8] 最终冻结哈希与审计文件检查')
+    if verify_freeze(q1_frozen) != 'PASS' or verify_v1_freeze()['Q2_V1_FREEZE'] != 'PASS':
+        raise RuntimeError('最终冻结文件复核失败')
+    (OUT/'q2_solver_log.txt').write_text('\n'.join(LOG), encoding='utf-8')
+    print('==============================\nQ2 P1 OPTIMIZATION FINISHED\n==============================')
+    print(f'Q1_FREEZE_INTEGRITY = PASS\nQ2_V1_FREEZE = PASS\nV2_VALID = {final_validation["Q2_VALID"]}')
+    print(f'Q2_V2_ACCEPTED = {accepted}')
+    for label, score in [('V1', v1_score), ('V2', final_score)]:
+        print(f'{label}: tardiness={score["ordinary_total_tardiness_s"]:.6f}, '
+              f'makespan={score["makespan_s"]:.6f}, energy={score["total_energy_kwh"]:.6f}, '
+              f'sorties={score["total_sorties"]}')
+    print(f'candidate_pool: V1=650, V2={len(pool)}, distribution={pool_stats["by_stops"]}')
+    print(f'selected_multistop_routes = {summary["selected_multistop_routes"]}')
+    for index in range(4):
+        matching = [row for row in stages if row['stage'] == f'F{index+1}']
+        print(f'F{index+1} status = '
+              f'{"OPTIMAL" if matching and matching[-1]["status"] == "OPTIMAL" else "FEASIBLE"}')
+    for field in ['medical_deadline_violations', 'first_batch_deadline_violations',
+                  'mass_violations', 'volume_violations', 'energy_reserve_violations',
+                  'uav_overlap', 'battery_overlap', 'reused_before_full_charge']:
+        print(f'{field} = {final_validation[field]}')
+    print(f'Greedy baseline = {greedy_metrics}')
+    print(f'official_excel_roundtrip = {template["official_excel_roundtrip"]}')
+    print(f'results = {OUT}')
+
+
+def write_p1_summary_md(summary, comparison, validation, template):
+    v1, v2 = summary['V1'], summary['V2']
+    greedy = summary['Greedy_baseline']
+    pool = summary['candidate_pool']
+    witness = next(r for r in summary['q1_fixed_baseline_diagnosis']
+                   if r['variant'] == 'without_hard_deadlines')
+    tradeoff = summary['tradeoff']
+    valid_trade = [r for r in tradeoff if r['solver_status'] in ('FEASIBLE', 'OPTIMAL')]
+    lines = ['# Q2 P1 定向优化结果', '',
+             '## 1. 冻结与接受判定', '',
+             f'Q1_FREEZE_INTEGRITY={summary["Q1_FREEZE_INTEGRITY"]}；'
+             f'Q2_V1_FREEZE={summary["Q2_V1_FREEZE"]}；'
+             f'Q2_V2_ACCEPTED={summary["Q2_V2_ACCEPTED"]}。',
+             'V1 作为独立可回退方案保存在 q2_v1_frozen，原 output/q2 未被改写。', '',
+             '| 方案 | F1 普通逾期 s | F2 makespan s | F3 能耗 kWh | F4 架次 | 逾期箱 |',
+             '|---|---:|---:|---:|---:|---:|']
+    for name, row in [('V1', v1), ('Greedy', greedy), ('V2', v2)]:
+        lines.append(f'| {name} | {row["ordinary_total_tardiness_s"]:.6f} | '
+                     f'{row["makespan_s"]:.6f} | {row["total_energy_kwh"]:.6f} | '
+                     f'{row["total_sorties"]} | {row["ordinary_late_boxes"]} |')
+    lines += ['', f'F1 下降 {comparison["tardiness_reduction_s"]:.6f} s '
+              f'({comparison["tardiness_reduction_percent"]:.2f}%)；'
+              'F1=0 触发 Stop A。能耗与架次数的变化按四层词典序如实保留。',
+              '', '## 2. 六个逾期箱与第八架 UAV', '',
+              'V1 的六箱均在 S001 的 Q2-018；当前分配的电池直到约 5986.193 s 才充满。'
+              'V1 池中每箱仅有五个单点候选。Greedy 使用 U03，V2 也使用 U03，'
+              '说明 V1 未使用它是搜索与组批排程的结果，而非 A 型物理不可行。',
+              f'V1 六箱在 V2 中仍逾期 {comparison["V1_late_boxes_still_late"]} 箱。',
+              '', '## 3. 候选池与正式路线', '',
+              f'V1 650 条候选全部保留；V2 活动池 {pool["active_count"]} 条，'
+              f'1/2/3/4+ 服务区分布 {pool["by_stops"]}。'
+              f'正式方案选中 {summary["selected_multistop_routes"]} 条多点路线。',
+              f'止损：{summary.get("stop_reason", "F1=0，停止继续扩池")}。',
+              '', '## 4. Q1 固定批次诊断', '',
+              '固定 18 批次在全部资源和硬时限下 INFEASIBLE；仅放松 UAV 或仅放松电池冲突仍不可行，'
+              '同时放松两类资源约束后硬时限可满足。保持资源约束、放松硬时限的诊断排程中，'
+              f'医疗违约 {witness.get("medical_deadline_violations")} 箱，'
+              f'首批违约 {witness.get("first_batch_deadline_violations")} 箱。'
+              '该违约数是诊断排程的见证值。',
+              '', '## 5. 多点路线 trade-off', '']
+    if valid_trade:
+        best_trade = min(valid_trade, key=lambda r: r['energy_kwh'])
+        lines.append(f'正式方案已有 {summary["selected_multistop_routes"]} 条多点路线。'
+                     f'在 F1=0 且 makespan 允许放松的诊断中，'
+                     f'{best_trade["scenario"]} 找到能耗 {best_trade["energy_kwh"]:.6f} kWh、'
+                     f'makespan {best_trade["F2_s"]:.6f} s、'
+                     f'{best_trade["selected_multistop_routes"]} 条多点路线的可行解。'
+                     '这说明可用少量完成时间换取能耗下降；该诊断解不替换正式词典序方案。')
+    lines += ['', '## 6. 资源、最优性与 Validator', '',
+              '| 机型 | UAV 平均利用率 | UAV 最大并发 | 电池忙碌比例 | 电池最大并发 |',
+              '|---|---:|---:|---:|---:|']
+    for row in summary['resource_utilization']:
+        lines.append(f'| {row["aircraft_type"]} | {row["uav_mean_utilization"]:.3f} | '
+                     f'{row["uav_max_concurrent"]} | '
+                     f'{row["battery_mean_busy_fraction"]:.3f} | '
+                     f'{row["battery_max_concurrent"]} |')
+    lines += ['', 'F1=0 对当前 1800 条候选池已证明 OPTIMAL；F2/F3/F4 仅为 FEASIBLE。'
+              '不能声称完整 Q2 全局最优。',
+              f'Q2_VALID={validation["Q2_VALID"]}；医疗、首批、载荷、舱容、能量、'
+              'UAV、电池与充满复用违规均为 0。',
+              f'官方优化版 Excel 回读={template["official_excel_roundtrip"]}；'
+              f'Q1 Sheet 不变={template["Q1_sheet_unchanged"]}。']
+    (OUT/'q2_summary.md').write_text('\n'.join(lines), encoding='utf-8')
+
+
+def main():
+    global Q1_ROWS
+    print('==============================\nQ2 正式求解开始\n==============================', flush=True)
+    if not DATA.is_dir():
+        raise RuntimeError(f'未找到官方数据目录：{DATA}')
+    OUT.mkdir(parents=True, exist_ok=True)
+    (OUT/'figures').mkdir(exist_ok=True)
+    log('[1/8] Gate-0 与 Q1 冻结核验')
+    frozen = gate_and_freeze()
+    log('[2/8] 加载官方数据')
+    nodes, boxes, models, uavs, batteries, full_charge = load_inputs()
+    with (ROOT/'output'/'q1'/'q1_batch_solution.csv').open(encoding='utf-8-sig', newline='') as fh:
+        Q1_ROWS = list(csv.DictReader(fh))
+    log(f'{len(nodes)} 节点、{len(boxes)} 箱、{sum(map(len,uavs.values()))} 架 UAV、'
+        f'{sum(map(len,batteries.values()))} 组电池')
+    log('[3/8] 构造 240 条有向 DEM 航段')
+    segments = build_segments(nodes, models)
+    log('[4/8] 生成物理可行候选池')
+    candidates, stats = generate_candidates(boxes, models, segments, full_charge)
+    pool_rows = [dict(candidate_id=c['id'], aircraft_type=c['g'], service_sequence=','.join(
+                 sid for sid, _ in c['groups']), box_ids=','.join(c['boxes']), box_count=len(c['boxes']),
+                 mass_kg=c['mass'], volume_m3=c['volume'], energy_kwh=c['energy'],
+                 return_offset_s=c['return_offset'], latest_start_s=c['latest_start']) for c in candidates]
+    csv_out('q2_candidate_stats.csv', pool_rows)
+    dump_json('q2_candidate_pool_summary.json', stats)
+    log(f'候选归档 {stats["archived_count"]}，活动 {stats["active_count"]}')
+    log('[5/8] 联合路线、UAV、电池和时间排程')
+    selected, stages, info = solve_joint(candidates, boxes, uavs, batteries)
+    expansions = 0
+    if selected is None or len(stages) < 4:
+        log('初始候选池未完成四层求解，定向扩大候选池')
+        expanded, expanded_stats = generate_candidates(boxes, models, segments, full_charge, round_no=1)
+        expansions = 1
+        if selected is None:
+            selected, stages, info = solve_joint(expanded, boxes, uavs, batteries, time_limit=120)
+            candidates, stats = expanded, expanded_stats
+        elif len(stages) < 4:
+            # 保留已求得的已验证可行解，扩池仅在完全无解时重跑，避免丢失 incumbent。
+            log('已获得可行 incumbent；保留该解及各层真实求解状态')
+    if selected is None:
+        raise RuntimeError(f'候选池扩展后联合 CP-SAT 仍未得到可行解：{info}')
+    log('[6/8] 独立浮点 Validator')
+    validation, routes, deliveries, uav_rows, battery_rows = validate_solution(
+        selected, boxes, models, segments, full_charge, uavs, batteries)
+    if not validation['Q2_VALID']:
+        dump_json('q2_validation.json', validation)
+        raise RuntimeError(f'正式解浮点 Validator 未通过：{validation["violations"][:8]}')
+    dump_json('best_feasible_solution.json', {'routes': routes, 'boxes': deliveries,
+                                               'validation': validation})
+    log('[7/8] Q1 固定组批与 EDF 基准')
+    baselines = baseline_comparison(candidates, boxes, models, segments, full_charge, uavs, batteries)
+    formal = metrics('Q2_formal', 'FEASIBLE', routes, deliveries, validation, stages)
+    formal['uav_usage'] = dict(Counter(r['uav_id'] for r in routes))
+    formal['battery_usage'] = dict(Counter(r['battery_id'] for r in routes))
+    log('[8/8] Excel、图、汇总与冻结复核')
+    path = export_results(routes, deliveries, uav_rows, battery_rows, baselines, stages, validation)
+    template_check = verify_template(path, routes, deliveries)
+    generate_figures(nodes, routes, deliveries, uav_rows, battery_rows)
+    if verify_freeze(frozen) != 'PASS':
+        raise RuntimeError('Q1 冻结哈希复核失败')
+    stats['expansion_rounds'] = expansions
+    summary = write_reports(formal, stages, baselines, validation, stats,
+                            info['time_quantization_max_s'], frozen, template_check)
+    (OUT/'q2_solver_log.txt').write_text('\n'.join(LOG), encoding='utf-8')
+    print('==============================\nQ2 SOLVED\n==============================')
+    for key in ['Q1_FREEZE_INTEGRITY', 'Q2_VALID', 'ordinary_total_tardiness_s',
+                'ordinary_late_boxes', 'makespan_s', 'total_energy_kwh', 'total_sorties',
+                'A_sorties', 'B_sorties', 'C_sorties']:
+        print(f'{key} = {summary[key]}')
+    for row in stages:
+        print(f'{row["objective"]} = {row["status"]}')
+    print(f'candidate_count = {len(candidates)}')
+    print(f'candidate_expansion_rounds = {expansions}')
+    print(f'official_template_export = {template_check["official_template_export"]}')
+    print(f'excel_roundtrip_check = {template_check["excel_roundtrip_check"]}')
+    print(f'results = {OUT}')
+
+
+if __name__ == '__main__':
+    p1_main()

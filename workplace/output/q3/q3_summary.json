@@ -1,0 +1,38 @@
+{
+  "ordinary_total_tardiness_s": 0,
+  "ordinary_late_boxes": 0,
+  "joint_makespan_s": 10688.15742441989,
+  "transport_energy_kwh": 68.26689060483082,
+  "relay_energy_kwh": 4.201368441745846,
+  "total_energy_kwh": 72.46825904657666,
+  "transport_sorties": 24,
+  "relay_sorties": 5,
+  "total_sorties": 29,
+  "Q3_VALID": true,
+  "GATE2_Q3_COMM_FEASIBLE": "PASS",
+  "Q4_K3_READY": true,
+  "strict_component_count": 3,
+  "minimum_certified_link_margin_db": 0.29212297724942005,
+  "Q1_Q2_sheets_unchanged": true,
+  "sampling_convergence": [
+    {
+      "spacing_m": 10,
+      "samples": 27923,
+      "minimum_sampled_margin_db": 0.42874053513665444,
+      "unavailable_samples": 0
+    },
+    {
+      "spacing_m": 5,
+      "samples": 55559,
+      "minimum_sampled_margin_db": 0.42874053513665444,
+      "unavailable_samples": 0
+    },
+    {
+      "spacing_m": 2.5,
+      "samples": 110843,
+      "minimum_sampled_margin_db": 0.42874053513665444,
+      "unavailable_samples": 0,
+      "last_two_margin_difference_db": 0.0
+    }
+  ]
+}

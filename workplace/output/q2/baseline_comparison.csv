@@ -1,0 +1,5 @@
+﻿scenario,status,total_sorties,total_energy_kwh,makespan_s,ordinary_total_tardiness_s,ordinary_late_boxes,ordinary_max_lateness_s,selected_route_stop_counts,A_sorties,B_sorties,C_sorties,Q2_VALID,objective_statuses,reason
+V1,FEASIBLE,21,63.40458286441995,11134.239158195542,11402.779175636728,6,3700.4631959394546,{1: 21},3,9,9,True,[],
+greedy_baseline,FEASIBLE,23,74.99407200986236,8849.6204360945,2434.8722863208695,3,1196.160762106956,"{1: 21, 2: 2}",9,6,8,True,[],
+Q1_fixed_baseline,INFEASIBLE,,,,,,,,,,,,,18 个冻结批次在实体 UAV、电池及硬时限联合约束下不可行；见诊断表
+V2,FEASIBLE,25,70.0227965612103,7361.933158195543,0,0,0,"{2: 4, 1: 21}",10,8,7,True,"['OPTIMAL', 'FEASIBLE', 'FEASIBLE', 'FEASIBLE']",

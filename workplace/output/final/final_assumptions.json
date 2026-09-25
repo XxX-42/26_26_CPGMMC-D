@@ -1,0 +1,32 @@
+{
+  "transport_horizontal_energy": {
+    "status": "DECLARED_MODEL_ASSUMPTION",
+    "formula": "E_use * horizontal_distance / (L0-(L0-LF)*(q/Q)^1.5)"
+  },
+  "transport_climb_energy": {
+    "status": "DECLARED_MODEL_ASSUMPTION",
+    "formula": "(m_empty_with_battery+q)*9.80665*h_up/(eta_up*3.6e6) kWh"
+  },
+  "dem_nodata_metadata": {
+    "status": "P1_DATA_METADATA",
+    "metadata_value": null,
+    "minus_32767_pixels": 0,
+    "task_geometry_valid": true
+  },
+  "relay_high_hover_vertical_transition": {
+    "status": "DECLARED_RELAY_VERTICAL_TRANSITION_ASSUMPTION",
+    "description": "中继悬停点高于沿线巡航净空高度时额外垂直转场并计入时间/爬升能耗"
+  },
+  "relay_link_setup_energy": {
+    "status": "DECLARED_RELAY_ENERGY_ASSUMPTION",
+    "description": "建链阶段持续悬停并开启通信模块"
+  },
+  "q4_relay_dependency": {
+    "status": "DECLARED_CONSERVATIVE_PARTITION_ASSUMPTION",
+    "description": "同一固定中继任务保障的运输架次所属服务区必须同组"
+  },
+  "q2_q3_delivery_time": {
+    "status": "DECLARED_SCHEDULING_ASSUMPTION",
+    "description": "同站多箱于该站全部交接作业完成时共同交付"
+  }
+}
